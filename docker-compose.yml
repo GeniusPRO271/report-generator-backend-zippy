@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hono_backend
+    ports:
+      - "3110:3110"
+    environment:
+      PORT: 3110
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/hono_reports
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: hono_migrate
+    command: bunx drizzle-kit migrate
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/hono_reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7
+    container_name: hono_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:16
+    container_name: hono_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: hono_reports
+    ports:
+      - "5555:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d hono_reports"]
+      interval: 3s
+      timeout: 3s
+      retries: 12
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+volumes:
+  redis_data:
+  pg_data:
