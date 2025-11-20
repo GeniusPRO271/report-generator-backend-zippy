@@ -152,7 +152,7 @@ export const ReportTransactionSchema = z.object({
   quantity: z.coerce.number(),
   commerceId: z.string(),
   commerceReqId: z.string(),
-  email: z.string().email(),
+  email: z.string(),
   name: z.string(),
   request_timestamp: z.coerce.number(),
   country: z.string(),
