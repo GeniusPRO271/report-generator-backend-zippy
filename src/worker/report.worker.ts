@@ -7,11 +7,6 @@ import { ReportRepository } from '../repositories/report.repository';
 import { ExcelGenerator } from '../excel/excel.generator';
 import { CreateReportSchemaType } from '../types/zod';
 
-async function simulateReportGeneration(data: any) {
-  console.log(`🧾 Generating report for job ${data.jobId}...`);
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-  return `https://fake-storage.local/reports/${data.jobId}.pdf`;
-}
 
 @Service()
 export class ReportWorker {

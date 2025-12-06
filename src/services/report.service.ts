@@ -3,8 +3,8 @@ import { ReportQueue } from '../queue/report.queue';
 import { ReportRepository } from '../repositories/report.repository';
 import { ReportJob, ReportRecord } from '../types';
 import { randomUUID } from 'crypto';
-import z from 'zod';
 import { CreateReportSchemaType } from '../types/zod';
+import { ReportSchemaType } from '../db/zodSchema/reports.schema';
 
 @Service()
 export class ReportService {
@@ -59,7 +59,7 @@ export class ReportService {
     return job;
   }
 
-  async getAllReports(): Promise<ReportRecord[]> {
+  async getAllReports(): Promise<ReportSchemaType[]> {
     return this.reportRepository.findAll();
   }
 }

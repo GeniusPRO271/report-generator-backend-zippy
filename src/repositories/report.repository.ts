@@ -1,34 +1,26 @@
 import { Service } from 'typedi';
 import { db } from '../db/connection';
-import { reports } from '../db/schema';
+import { report } from '../db/schema';
 import { eq } from 'drizzle-orm';
-
-interface ReportRecord {
-  id: string;
-  merchantName: string;
-  reportType: 'finance' | 'resume';
-  country: string;
-  status: string;
-  resultUrl?: string;
-}
+import { InsertReportSchemaType, ReportSchemaType } from '../db/zodSchema/reports.schema';
 
 @Service()
 export class ReportRepository {
-  async create(report: ReportRecord) {
-    await db.insert(reports).values(report);
+  async create(data: InsertReportSchemaType) {
+    await db.insert(report).values(data);
     return report;
   }
 
-  async update(id: string, updates: Partial<Omit<ReportRecord, 'id'>>) {
-    await db.update(reports).set(updates).where(eq(reports.id, id));
+  async update(id: string, updates: Partial<Omit<ReportSchemaType, 'id'>>) {
+    await db.update(report).set(updates).where(eq(report.id, id));
   }
 
   async findById(id: string) {
-    const result = await db.select().from(reports).where(eq(reports.id, id)).limit(1);
+    const result = await db.select().from(report).where(eq(report.id, id)).limit(1);
     return result[0] || null;
   }
 
   async findAll() {
-    return await db.select().from(reports).orderBy(reports.createdAt) as ReportRecord[];
+    return await db.select().from(report).orderBy(report.createdAt) as ReportSchemaType[];
   }
 }

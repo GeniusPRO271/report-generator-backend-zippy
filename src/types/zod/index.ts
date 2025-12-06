@@ -139,11 +139,6 @@ export const ReportResumePathSchema = z.object({
 export type ReportResumePathSchemaType = z.infer<typeof ReportResumePathSchema>["merchants"];
 
 
-export const FirestoreTimestampSchema = z.object({
-  _seconds: z.coerce.number(),
-  _nanoseconds: z.coerce.number(),
-});
-
 export const ReportTransactionSchema = z.object({
   id: z.string(),
   merchantName: z.string(),
@@ -162,7 +157,7 @@ export const ReportTransactionSchema = z.object({
   zippy_test: z.boolean(),
   url_OK: z.string().url(),
   url_ERROR: z.string().url(),
-  dateRequest: FirestoreTimestampSchema,
+  dateRequest: z.string(),
   code: z.number(),
   status: z.enum(["pending", "ok", "error"]),
 });
@@ -172,6 +167,10 @@ export const CreateReportSchema = z.discriminatedUnion("reportType", [
   z.object({
     reportType: z.literal("finance"),
     parameters: ReportFinancePathSchema,
+    transactions: z.array(ReportTransactionSchema)
+  }),
+  z.object({
+    reportType: z.literal("daily"),
     transactions: z.array(ReportTransactionSchema)
   }),
   z.object({
