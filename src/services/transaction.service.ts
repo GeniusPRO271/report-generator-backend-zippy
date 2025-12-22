@@ -178,7 +178,7 @@ export class TransactionService {
     return await this.transactionRepository.create(record);
   }
 
-  async findAll() {
+  async findAll(page: number, limit: number) {
     const transactions = await this.transactionRepository.findAll();
 
     const results = [];
@@ -201,20 +201,25 @@ export class TransactionService {
     return results;
   }
 
-  async findAllVersion2(): Promise<BaseTransaction[]> {
-    const transactions = await this.transactionRepository.findAll();
+  async findAllVersion2(page: number, limit: number) {
+    page = Math.max(1, page);
+    limit = Math.max(1, limit);
+
+    const total = await this.transactionRepository.count();
+
+    const transactions = await this.transactionRepository.find(page, limit);
 
     const results: BaseTransaction[] = [];
 
     for (const t of transactions) {
-      const merchant = await this.merchantRepository.findById(t.merchantId);
-      const provider = await this.providerRepository.findById(t.providerId);
-      const country = await this.countryRepository.findById(t.countryId);
-      const payMethod = await this.payMethodRepository.findById(t.payMethodId);
+      const [merchant, provider, country, payMethod] = await Promise.all([
+        this.merchantRepository.findById(t.merchantId),
+        this.providerRepository.findById(t.providerId),
+        this.countryRepository.findById(t.countryId),
+        this.payMethodRepository.findById(t.payMethodId),
+      ]);
 
-      if (!merchant || !provider || !country || !payMethod) {
-        continue;
-      }
+      if (!merchant || !provider || !country || !payMethod) continue;
 
       results.push({
         id: t.id,
@@ -240,7 +245,19 @@ export class TransactionService {
       });
     }
 
-    return results;
+    const totalPages = Math.ceil(total / limit);
+
+    return {
+      data: results,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      }
+    };
   }
 
 
@@ -274,11 +291,12 @@ export class TransactionService {
     const results = [];
 
     for (const raw of jsonArray) {
-      try {
 
+      try {
         const existing = await this.transactionRepository.findByCommerceId(raw.commerceReqId);
 
         if (existing) {
+
           results.push({
             success: false,
             skipped: true,
@@ -288,23 +306,13 @@ export class TransactionService {
           continue;
         }
 
-        const merchant = await this.findOrCreateMerchant(
-          raw.merchantName,
-          raw.email
-        );
+        const merchant = await this.findOrCreateMerchant(raw.merchantName, raw.email);
 
         const provider = await this.findOrCreateProvider(raw.provider);
 
-        const country = await this.findOrCreateCountry(
-          raw.country,
-          raw.currency
-        );
+        const country = await this.findOrCreateCountry(raw.country, raw.currency);
 
-        const payMethod = await this.findOrCreatePayMethod(
-          raw.payMethod,
-          provider.id,
-          country.id
-        );
+        const payMethod = await this.findOrCreatePayMethod(raw.payMethod, provider.id, country.id);
 
         await this.ensureCountryOperationExists({
           merchantId: merchant.id,
@@ -313,33 +321,70 @@ export class TransactionService {
           payMethodId: payMethod.id,
         });
 
-        const createdTx = await this.transactionRepository.create({
+        let dateRequest: Date;
+
+        if (typeof raw.dateRequest === "string") {
+          dateRequest = new Date(raw.dateRequest);
+        } else if (raw.dateRequest?._seconds != null) {
+          dateRequest = new Date(raw.dateRequest._seconds * 1000);
+        } else {
+          throw new Error(`Invalid dateRequest format for record ${raw.commerceReqId}`);
+        }
+
+
+        const transactionData = {
           merchantId: merchant.id,
           providerId: provider.id,
           payMethodId: payMethod.id,
           countryId: country.id,
-          documentId: raw.documentId,
+          documentId: String(raw.documentId),
+
           quantity: raw.quantity,
+
           commerceId: raw.commerceId,
           commerceReqId: raw.commerceReqId,
           email: raw.email,
           name: raw.name,
+
           requestTimestamp: Number(raw.request_timestamp),
+
           currency: raw.currency,
+
           payinExpirationTime: raw.payinExpirationTime,
+
           urlOk: raw.url_OK,
           urlError: raw.url_ERROR,
-          dateRequest: new Date(raw.dateRequest._seconds * 1000),
-          code: raw.code,
+
+          dateRequest,
+
+          code: Number(raw.code),
           status: raw.status,
           isTest: raw.zippy_test ?? false,
-        });
+        };
+
+        let createdTx;
+        try {
+          createdTx = await this.transactionRepository.create(transactionData);
+        } catch (dbError: any) {
+          throw new Error(
+            `Database insert failed: ${dbError.message}\n` +
+            `Code: ${dbError.code || 'N/A'}\n` +
+            `Detail: ${dbError.detail || 'N/A'}\n` +
+            `Constraint: ${dbError.constraint || 'N/A'}\n` +
+            `Column: ${dbError.column || 'N/A'}`
+          );
+        }
 
         results.push({ success: true, id: createdTx.id });
+
       } catch (err: any) {
         results.push({
           success: false,
           error: err.message,
+          errorCode: err.code,
+          errorDetail: err.detail,
+          errorConstraint: err.constraint,
+          stack: err.stack,
           data: raw,
         });
       }

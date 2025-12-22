@@ -1,4 +1,4 @@
-import { boolean, integer, numeric, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, integer, numeric, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 export const report = pgTable('report', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -136,7 +136,7 @@ export const transaction = pgTable("transaction", {
   commerceReqId: text("commerce_req_id").notNull(),
   email: text("email").notNull(),
   name: text("name").notNull(),
-  requestTimestamp: integer("request_timestamp").notNull(),
+  requestTimestamp: bigint("request_timestamp", { mode: "number" }).notNull(),
   currency: text("currency").notNull(),
   payinExpirationTime: text("payin_expiration_time").notNull(),
   urlOk: text("url_ok").notNull(),

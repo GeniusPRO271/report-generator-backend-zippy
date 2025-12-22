@@ -3,7 +3,6 @@ import { randomUUID } from "crypto";
 import { ProviderRepository } from "../repositories/provider.repository";
 import {
   InsertProviderSchemaType,
-  ProviderSchemaType,
   UpdateProviderSchemaType
 } from "../db/zodSchema/provider.schema";
 

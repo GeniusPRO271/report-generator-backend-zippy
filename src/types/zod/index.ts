@@ -163,6 +163,8 @@ export const ReportTransactionSchema = z.object({
 });
 
 
+export type ReportTransactionSchemaType = z.infer<typeof ReportTransactionSchema>
+
 export const CreateReportSchema = z.discriminatedUnion("reportType", [
   z.object({
     reportType: z.literal("finance"),
@@ -171,7 +173,6 @@ export const CreateReportSchema = z.discriminatedUnion("reportType", [
   }),
   z.object({
     reportType: z.literal("daily"),
-    transactions: z.array(ReportTransactionSchema)
   }),
   z.object({
     reportType: z.literal("resume"),

@@ -5,7 +5,6 @@ export const StatsFilterSchema = z.object({
   providerId: z.string().uuid().optional(),
   countryId: z.string().uuid().optional(),
   payMethodId: z.string().uuid().optional(),
-
   dateRange: z
     .object({
       from: z.string().datetime().optional(),

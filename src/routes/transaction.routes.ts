@@ -3,6 +3,7 @@ import { zValidator } from "@hono/zod-validator";
 import Container from "typedi";
 import { TransactionService } from "../services/transaction.service";
 import { InsertTransactionSchema, UpdateTransactionSchema } from "../db/zodSchema/transactions.schema";
+import { PaginationSchema } from "../types/zod/pagination";
 
 const transactionRoutes = new Hono();
 const transactionService = Container.get(TransactionService);
@@ -17,15 +18,21 @@ transactionRoutes.post(
   }
 );
 
-transactionRoutes.get("/", async (c) => {
-  const all = await transactionService.findAll();
-  return c.json(all);
-});
+transactionRoutes.get("/",
+  zValidator("query", PaginationSchema),
+  async (c) => {
+    const { page, limit } = c.req.valid("query");
+    const all = await transactionService.findAll(page, limit);
+    return c.json(all);
+  });
 
-transactionRoutes.get("/v2", async (c) => {
-  const all = await transactionService.findAllVersion2();
-  return c.json(all);
-});
+transactionRoutes.get("/v2",
+  zValidator("query", PaginationSchema),
+  async (c) => {
+    const { page, limit } = c.req.valid("query");
+    const all = await transactionService.findAllVersion2(page, limit);
+    return c.json(all);
+  });
 
 transactionRoutes.get("/:id", async (c) => {
   const id = c.req.param("id");

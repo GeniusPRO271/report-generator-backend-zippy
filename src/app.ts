@@ -10,13 +10,14 @@ import countryOperationRoutes from './routes/countryOperation.routes';
 import transactionRoutes from './routes/transaction.routes';
 import healthRoutes from './routes/health.routes';
 import { logger } from './middleware/logger';
+import statisticsRoutes from './routes/statistics.route';
 const app = new Hono();
 
 app.use('*', cors());
 app.use('*', logger({
   colorize: true,
-  logRequestBody: true,
-  logResponseBody: true,
+  logRequestBody: false,
+  logResponseBody: false,
   maxBodySize: 5000,
   logHeaders: true,
   skip: ['/health', '/metrics'],
@@ -30,6 +31,7 @@ app.route('/merchants', merchantRoutes);
 app.route('/merchant-api-config', merchantAPIConfigRoutes);
 app.route('/countries', countryRoutes);
 app.route('/country-operations', countryOperationRoutes);
+app.route('/stats', statisticsRoutes);
 app.route('/transactions', transactionRoutes);
 
 export default app;

@@ -27,6 +27,14 @@ export class ReportService {
         break;
       }
 
+      case "daily": {
+
+        merchantName = "Daily Report"
+        countryName = "All"
+
+        break;
+      }
+
       case "resume": {
         const firstMerchant = data.parameters.merchants[0];
         merchantName = firstMerchant?.merchantName ?? "Resume Report";
