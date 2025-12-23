@@ -345,8 +345,7 @@ export class TransactionService {
           commerceReqId: raw.commerceReqId,
           email: raw.email,
           name: raw.name,
-
-          requestTimestamp: Number(raw.request_timestamp),
+          requestTimestamp: Math.floor(Number(raw.request_timestamp) / 1000),
 
           currency: raw.currency,
 
@@ -389,6 +388,7 @@ export class TransactionService {
         });
       }
     }
+
 
     return results;
   }
