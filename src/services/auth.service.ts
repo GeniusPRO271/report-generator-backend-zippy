@@ -2,8 +2,8 @@ import { Service } from 'typedi'
 import { SignJWT, jwtVerify } from 'jose'
 import { LoginInput } from '../types/zod/auth'
 
-const ACCESS_TOKEN_EXP = '1m'
-const REFRESH_TOKEN_EXP = '7d'
+const ACCESS_TOKEN_EXP = '7d'
+const REFRESH_TOKEN_EXP = '30d'
 const SECRET = process.env.SESSION_SECRET
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
