@@ -1,0 +1,1 @@
+ALTER TABLE "transaction" ALTER COLUMN "request_timestamp" SET DATA TYPE bigint;
