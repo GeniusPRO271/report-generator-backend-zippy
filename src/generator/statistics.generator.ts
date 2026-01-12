@@ -21,8 +21,8 @@ import {
   getLast5WeeksAOVChartData,
   getLast5WeeksSuccessRateChartData,
   calculateLastWeekIncrease,
-  filterTransactionsByDateRange,
   processTransactionData,
+  computeCountryRevenue,
 } from "../utils/statistic.utils";
 
 import { BaseTransaction } from "../types";
@@ -53,38 +53,35 @@ export class StatsGenerator {
 
   public generate(
     transactions: BaseTransaction[],
-    filters?: any
   ): AnalyticsResultBackend {
 
-    const filtered = filterTransactionsByDateRange(transactions);
+    const avgOrderValue = calculateAOV(transactions);
+    const successRate = calculateSuccessRate(transactions);
 
-    const avgOrderValue = calculateAOV(filtered);
-    const successRate = calculateSuccessRate(filtered);
+    const totalRevenue = calculateTotalRevenue(transactions);
+    const monthlyRevenue = aggregateRevenueByMonth(transactions);
+    const revenueChange = calculateRevenueChangeValue(transactions);
 
-    const totalRevenue = calculateTotalRevenue(filtered);
-    const monthlyRevenue = aggregateRevenueByMonth(filtered);
-    const revenueChange = calculateRevenueChangeValue(filtered);
+    const revenueByCountry = computeCountryRevenue(transactions);
 
-    const revenueByCountry = this.computeCountryRevenue(filtered);
+    const transactionsForChart = aggregateTransactionsByDay(transactions);
+    const countriesData = groupTransactionsByCountry(transactions);
 
-    const transactionsForChart = aggregateTransactionsByDay(filtered);
-    const countriesData = groupTransactionsByCountry(filtered);
+    const revenuByDay = generateRevenueChartData(transactions);
+    const chartConfig = generateChartConfig(transactions);
 
-    const revenuByDay = generateRevenueChartData(filtered);
-    const chartConfig = generateChartConfig(filtered);
+    const trxRate = processTransactionData(transactions);
 
-    const trxRate = processTransactionData(filtered);
+    const last5WeeksData = getLast5WeeksChartData(transactions);
+    const last5WeeksAOVData = getLast5WeeksAOVChartData(transactions);
+    const last5WeeksSuccessRateData = getLast5WeeksSuccessRateChartData(transactions);
 
-    const last5WeeksData = getLast5WeeksChartData(filtered);
-    const last5WeeksAOVData = getLast5WeeksAOVChartData(filtered);
-    const last5WeeksSuccessRateData = getLast5WeeksSuccessRateChartData(filtered);
-
-    const lastWeekIncreaseCount = calculateLastWeekIncrease(filtered, "count");
-    const lastWeekIncreaseAOV = calculateLastWeekIncrease(filtered, "aov");
-    const lastWeekIncreaseSuccessRate = calculateLastWeekIncrease(filtered, "successRate");
+    const lastWeekIncreaseCount = calculateLastWeekIncrease(transactions, "count");
+    const lastWeekIncreaseAOV = calculateLastWeekIncrease(transactions, "aov");
+    const lastWeekIncreaseSuccessRate = calculateLastWeekIncrease(transactions, "successRate");
 
     return {
-      totalTransactions: filtered.length,
+      totalTransactions: transactions.length,
       avgOrderValue,
       successRate,
       totalRevenue,
@@ -105,49 +102,4 @@ export class StatsGenerator {
     };
   }
 
-  private computeCountryRevenue(
-    transactions: BaseTransaction[],
-  ): RevenueCountry[] {
-
-    const WEEK = 7 * 24 * 3600 * 1000;
-    const now = Date.now();
-
-    const lastWeekStart = now - WEEK;
-    const prevWeekStart = now - 2 * WEEK;
-    const prevWeekEnd = now - WEEK;
-
-    const map = new Map<
-      string,
-      { total: number; lastWeek: number; prevWeek: number }
-    >();
-
-    for (const tx of transactions) {
-      if (tx.status !== "ok") continue;
-
-      const ms = new Date(tx.dateRequest).getTime();
-      const qty = Number(tx.quantity);
-
-      if (!map.has(tx.country)) {
-        map.set(tx.country, { total: 0, lastWeek: 0, prevWeek: 0 });
-      }
-
-      const v = map.get(tx.country)!;
-
-      v.total += qty;
-
-      if (ms >= lastWeekStart) v.lastWeek += qty;
-      if (ms >= prevWeekStart && ms < prevWeekEnd) v.prevWeek += qty;
-    }
-
-    return [...map.entries()].map(([country, v]) => {
-      const pct =
-        v.prevWeek === 0 ? (v.lastWeek > 0 ? 100 : 0) : ((v.lastWeek - v.prevWeek) / v.prevWeek) * 100;
-
-      return {
-        country,
-        totalRevenue: Number(v.total.toFixed(2)),
-        lastWeekIncrease: Number(pct.toFixed(2)),
-      };
-    });
-  }
 }

@@ -1,7 +1,7 @@
 import { Service } from "typedi";
 import { db } from "../db/connection";
 import { payMethod } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { InsertPayMethodSchemaType, PayMethodSchemaType } from "../db/zodSchema/payMethod.schema";
 
 @Service()
@@ -14,6 +14,15 @@ export class PayMethodRepository {
   async findAll(): Promise<PayMethodSchemaType[]> {
     return await db.select().from(payMethod);
   }
+
+  async findByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return await db
+      .select()
+      .from(payMethod)
+      .where(inArray(payMethod.id, ids));
+  }
+
 
   async findById(id: string): Promise<PayMethodSchemaType> {
     const [pm] = await db.select().from(payMethod).where(eq(payMethod.id, id));

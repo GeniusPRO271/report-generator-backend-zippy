@@ -2,6 +2,7 @@ import { Service } from 'typedi';
 import ExcelJS from 'exceljs';
 import fs from 'fs';
 import path from 'path';
+import { DateTime } from 'luxon';
 import z from 'zod';
 import {
   CreateReportSchemaType,
@@ -9,7 +10,6 @@ import {
   ReportTransactionSchema,
   ReportTransactionSchemaType,
 } from '../types/zod';
-import { BaseTransaction } from '../types';
 
 interface MethodParameter {
   methodId: string;
@@ -66,11 +66,194 @@ export class ExcelGenerator {
       }
 
       case 'daily':
-        return this.generateMonthlyResumeReport(transactions, reportId);
+        // return this.generateMonthlyResumeReport(transactions, reportId)
+        console.log("RUNING DAILY NEW VERSION")
+        const fromDate = DateTime.fromObject(
+          { year: 2025, month: 12, day: 1, hour: 0, minute: 0 },
+          { zone: 'America/Santiago' }
+        ).toJSDate();
 
+        const toDate = DateTime.fromObject(
+          { year: 2025, month: 12, day: 31, hour: 23, minute: 59, second: 59, millisecond: 999 },
+          { zone: 'America/Santiago' }
+        ).toJSDate();
+
+        return this.generateMerchantCountryMethodReport(
+          transactions,
+          fromDate,
+          toDate
+        );
       default:
         throw new Error(`❌ Unknown report type: ${reportType}`);
     }
+  }
+
+  /**
+ * Generates Merchant x Country x Method report
+ */
+  private async generateMerchantCountryMethodReport(
+    transactions: ReportTransactionSchemaType[],
+    fromDate?: Date,
+    toDate?: Date,
+  ): Promise<string> {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Merchant Report');
+
+    // --- Filter transactions by date range ---
+    let filteredTransactions = transactions;
+
+    if (fromDate || toDate) {
+      filteredTransactions = transactions.filter((tx) => {
+        const txDate = new Date(tx.dateRequest);
+
+        if (fromDate) {
+          if (txDate < fromDate) return false;
+        }
+
+        if (toDate) {
+          if (txDate > toDate) return false;
+        }
+
+        return true;
+      });
+
+      console.log(`📅 Date range filter applied: ${fromDate?.toISOString() || 'N/A'} to ${toDate?.toISOString() || 'N/A'}`);
+      console.log(`📊 Filtered transactions: ${filteredTransactions.length} out of ${transactions.length}`);
+    }
+
+    // --- Step 1: Collect unique countries, methods, merchants from FILTERED transactions ---
+    const countries = Array.from(new Set(filteredTransactions.map((tx) => tx.country.toUpperCase())));
+    const countryMethodMap = new Map<string, string[]>();
+    for (const country of countries) {
+      const methods = Array.from(
+        new Set(
+          filteredTransactions
+            .filter((tx) => tx.country.toUpperCase() === country)
+            .map((tx) => tx.payMethod.toUpperCase())
+        )
+      );
+      countryMethodMap.set(country, methods);
+    }
+
+    const merchants = Array.from(new Set(filteredTransactions.map((tx) => tx.merchantName)));
+
+    // --- Step 2: Build top header rows ---
+    let colIndex = 2;
+    const countryPositions: { start: number; end: number }[] = [];
+
+    for (const country of countries) {
+      const methods = countryMethodMap.get(country)!;
+      const start = colIndex;
+      const end = colIndex + methods.length - 1;
+
+      sheet.mergeCells(1, start, 1, end);
+      const cell = sheet.getCell(1, start);
+      cell.value = country;
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.font = { bold: true };
+
+      countryPositions.push({ start, end });
+      colIndex = end + 1;
+    }
+
+    // Row 2: Method headers
+    colIndex = 2;
+    const countryMethodOrder: { country: string; method: string }[] = [];
+
+    for (const country of countries) {
+      const methods = countryMethodMap.get(country)!;
+      for (const method of methods) {
+        const cell = sheet.getCell(2, colIndex);
+        cell.value = method;
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.font = { bold: true };
+        countryMethodOrder.push({ country, method });
+        colIndex++;
+      }
+    }
+
+    // --- Step 3: Fill merchant rows with FILTERED data ---
+    let rowIndex = 3;
+    for (const merchant of merchants) {
+      const rowData: (string | number)[] = [merchant];
+
+      for (const { country, method } of countryMethodOrder) {
+        const count = filteredTransactions.filter(
+          (tx) =>
+            tx.merchantName === merchant &&
+            tx.country.toUpperCase() === country &&
+            tx.payMethod.toUpperCase() === method &&
+            tx.status === 'ok'
+        ).length;
+        rowData.push(Number(count));
+      }
+
+      const addedRow = sheet.addRow(rowData);
+
+      addedRow.eachCell((cell, colNum) => {
+        cell.alignment = { horizontal: colNum === 1 ? 'left' : 'center', vertical: 'middle' };
+      });
+
+      rowIndex++;
+    }
+
+    // --- Step 4: Set column widths ---
+    sheet.getColumn(1).width = 30;
+    for (let i = 2; i <= sheet.columnCount; i++) {
+      sheet.getColumn(i).width = 15;
+    }
+
+    // --- Step 5: Create a tab per merchant with all OK transactions sorted by date ---
+    for (const merchant of merchants) {
+      const merchantSheet = workbook.addWorksheet(merchant);
+
+      const merchantTxs = filteredTransactions
+        .filter((tx) => tx.merchantName === merchant && tx.status === 'ok')
+        .sort((a, b) => new Date(a.dateRequest).getTime() - new Date(b.dateRequest).getTime());
+
+      // Header row
+      const headers = ['Date', 'Country', 'Method', 'Status', 'Amount', 'Currency', 'Commerce Req ID'];
+      merchantSheet.addRow(headers).eachCell((cell) => {
+        cell.font = { bold: true };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      });
+
+      // Transactions
+      for (const tx of merchantTxs) {
+        const rowData = [
+          tx.dateRequest,
+          tx.country,
+          tx.payMethod,
+          tx.status,
+          tx.quantity,
+          tx.currency,
+          tx.commerceReqId,
+        ];
+        const row = merchantSheet.addRow(rowData);
+        row.eachCell((cell, colNum) => {
+          cell.alignment = { horizontal: colNum === 1 ? 'left' : 'center', vertical: 'middle' };
+        });
+      }
+
+      // Set column widths
+      headers.forEach((header, idx) => {
+        merchantSheet.getColumn(idx + 1).width = header.length + 5;
+      });
+    }
+
+    // --- Step 6: Save workbook ---
+    const outputDir = path.join(process.cwd(), 'Exceldata');
+    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+
+    const dateRangeStr = fromDate && toDate
+      ? `_${fromDate.toISOString().split('T')[0]}_to_${toDate.toISOString().split('T')[0]}`
+      : '';
+
+    const filePath = path.join(outputDir, `merchant_country_method_report${dateRangeStr}.xlsx`);
+    await workbook.xlsx.writeFile(filePath);
+
+    console.log(`✅ Merchant-country-method report saved at: ${filePath}`);
+    return filePath;
   }
 
   /**
@@ -97,7 +280,8 @@ export class ExcelGenerator {
       (tx) =>
         tx.country.toLowerCase() === parameters.countryName.toLowerCase(),
     );
-    pushLog(`Filtered transactions: ${filtered.length}`);
+    pushLog(`Filtered transactions: ${filtered.length
+      }`);
 
     // Build commission map
     const commissionMap = new Map<string, Map<string, string>>();

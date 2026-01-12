@@ -1,10 +1,22 @@
 import { z } from "zod";
 
 export const StatsFilterSchema = z.object({
-  merchantId: z.string().uuid().optional(),
-  providerId: z.string().uuid().optional(),
-  countryId: z.string().uuid().optional(),
-  payMethodId: z.string().uuid().optional(),
+  merchantId: z
+    .union([z.string().uuid(), z.array(z.string().uuid())])
+    .optional()
+    .transform((val) => (val ? ([] as string[]).concat(val) : [])),
+  providerId: z
+    .union([z.string().uuid(), z.array(z.string().uuid())])
+    .optional()
+    .transform((val) => (val ? ([] as string[]).concat(val) : [])),
+  countryId: z
+    .union([z.string().uuid(), z.array(z.string().uuid())])
+    .optional()
+    .transform((val) => (val ? ([] as string[]).concat(val) : [])),
+  payMethodId: z
+    .union([z.string().uuid(), z.array(z.string().uuid())])
+    .optional()
+    .transform((val) => (val ? ([] as string[]).concat(val) : [])),
   dateRange: z
     .object({
       from: z.string().datetime().optional(),

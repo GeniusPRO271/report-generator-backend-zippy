@@ -45,9 +45,52 @@ transactionRoutes.post("/import", async (c) => {
   if (!Array.isArray(data)) {
     return c.json({ error: "Expected an array of transactions" }, 400);
   }
+  const payins: any[] = [];
+  const payouts: any[] = [];
+  for (const item of data) {
+    const type = item.type?.toUpperCase();
+    if (type === 'PAYOUT') {
+      payouts.push(item);
+    } else {
+      payins.push(item);
+    }
+  }
+  const results: any[] = [];
+  if (payins.length > 0) {
+    const payinResults = await transactionService.importTransactions(payins);
+    results.push(...payinResults);
+  }
+  if (payouts.length > 0) {
+    const payoutResults = await transactionService.importPayouts(payouts);
+    results.push(...payoutResults);
+  }
+  return c.json(results);
+});
 
-  const result = await transactionService.importTransactions(data);
-  return c.json(result);
+// New route to find and log all duplicates without deleting
+transactionRoutes.get("/duplicates/find", async (c) => {
+  try {
+    const result = await transactionService.findDuplicates();
+    return c.json(result);
+  } catch (error: any) {
+    return c.json({
+      error: "Failed to find duplicates",
+      message: error.message
+    }, 500);
+  }
+});
+
+// Route to delete duplicate transactions
+transactionRoutes.delete("/duplicates", async (c) => {
+  try {
+    const result = await transactionService.deleteDuplicates();
+    return c.json(result);
+  } catch (error: any) {
+    return c.json({
+      error: "Failed to delete duplicates",
+      message: error.message
+    }, 500);
+  }
 });
 
 transactionRoutes.put(

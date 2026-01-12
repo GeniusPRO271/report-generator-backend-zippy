@@ -1,7 +1,7 @@
 import { Service } from "typedi";
 import { db } from "../db/connection";
 import { provider } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { ProviderSchemaType } from "../db/zodSchema/provider.schema";
 
 @Service()
@@ -14,6 +14,15 @@ export class ProviderRepository {
   async findAll() {
     return await db.select().from(provider);
   }
+
+  async findByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return await db
+      .select()
+      .from(provider)
+      .where(inArray(provider.id, ids));
+  }
+
 
   async findById(id: string) {
     const [p] = await db.select().from(provider).where(eq(provider.id, id));

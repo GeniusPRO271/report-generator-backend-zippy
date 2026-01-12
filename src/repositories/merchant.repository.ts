@@ -1,7 +1,7 @@
 import { Service } from "typedi";
 import { db } from "../db/connection";
 import { merchant } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 @Service()
 export class MerchantRepository {
@@ -12,6 +12,14 @@ export class MerchantRepository {
 
   async findAll() {
     return await db.select().from(merchant);
+  }
+
+  async findByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return await db
+      .select()
+      .from(merchant)
+      .where(inArray(merchant.id, ids));
   }
 
   async findById(id: string) {

@@ -7,12 +7,23 @@ import { StatsService } from '../services/statistics.service';
 const statisticsRoutes = new Hono();
 const statsService = Container.get(StatsService);
 
-statisticsRoutes.get("/stats",
-  zValidator("json", StatsFilterSchema),
+statisticsRoutes.get(
+  "/",
+  zValidator("query", StatsFilterSchema),
   async (c) => {
-    const filters = c.req.valid("json");
-    const stats = await statsService.getStats(filters);
-    return c.json(stats);
-  });
+    try {
+      const filters = c.req.valid("query");
+      console.debug("[StatisticsRoute] Incoming request with filters:", filters);
 
-export default statisticsRoutes
+      const stats = await statsService.getStats(filters);
+      console.debug("[StatisticsRoute] Returning stats response");
+
+      return c.json(stats);
+    } catch (err) {
+      console.error("[StatisticsRoute] Error processing request:", err);
+      return c.json({ error: "Failed to fetch statistics" }, 500);
+    }
+  }
+);
+
+export default statisticsRoutes;

@@ -138,9 +138,9 @@ export const transaction = pgTable("transaction", {
   name: text("name").notNull(),
   requestTimestamp: bigint("request_timestamp", { mode: "number" }).notNull(),
   currency: text("currency").notNull(),
-  payinExpirationTime: text("payin_expiration_time").notNull(),
-  urlOk: text("url_ok").notNull(),
-  urlError: text("url_error").notNull(),
+  payinExpirationTime: text("payin_expiration_time"),
+  urlOk: text("url_ok"),
+  urlError: text("url_error"),
   dateRequest: timestamp("date_request", { withTimezone: true }).notNull(),
   code: integer("code").notNull(),
   status: text("status", {

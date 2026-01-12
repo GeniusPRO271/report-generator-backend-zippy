@@ -1,5 +1,5 @@
 import { Service } from "typedi";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { country } from "../db/schema";
 import { db } from "../db/connection";
 import { CountrySchemaType, InsertCountrySchemaType } from "../db/zodSchema/country.schema";
@@ -17,6 +17,15 @@ export class CountryRepository {
   async findAll(): Promise<CountrySchemaType[]> {
     return await db.select().from(country);
   }
+
+  async findByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return await db
+      .select()
+      .from(country)
+      .where(inArray(country.id, ids));
+  }
+
 
   async findById(id: string): Promise<CountrySchemaType | undefined> {
     const [row] = await db

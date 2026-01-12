@@ -1,7 +1,7 @@
 import { Service } from "typedi";
 import { db } from "../db/connection";
 import { transaction } from "../db/schema";
-import { and, eq, gte, lte, sql, SQL } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, sql, SQL } from "drizzle-orm";
 import { InsertTransactionSchemaType, TransactionSchemaType } from "../db/zodSchema/transactions.schema";
 import { StatsFilterSchemaType } from "../types/zod/statsSchemas";
 
@@ -118,29 +118,25 @@ export class TransactionRepository {
   async findWithFilter(filters: StatsFilterSchemaType) {
     const clauses: SQL[] = [];
 
-    if (filters.merchantId) {
-      clauses.push(eq(transaction.merchantId, filters.merchantId));
+    // Only add filters if arrays have elements
+    if (filters.merchantId?.length) {
+      clauses.push(inArray(transaction.merchantId, filters.merchantId));
     }
-    if (filters.providerId) {
-      clauses.push(eq(transaction.providerId, filters.providerId));
+    if (filters.providerId?.length) {
+      clauses.push(inArray(transaction.providerId, filters.providerId));
     }
-    if (filters.countryId) {
-      clauses.push(eq(transaction.countryId, filters.countryId));
+    if (filters.countryId?.length) {
+      clauses.push(inArray(transaction.countryId, filters.countryId));
     }
-    if (filters.payMethodId) {
-      clauses.push(eq(transaction.payMethodId, filters.payMethodId));
+    if (filters.payMethodId?.length) {
+      clauses.push(inArray(transaction.payMethodId, filters.payMethodId));
     }
+
     if (filters.dateRange?.from) {
-      clauses.push(gte(
-        transaction.dateRequest,
-        new Date(filters.dateRange.from)
-      ));
+      clauses.push(gte(transaction.dateRequest, new Date(filters.dateRange.from)));
     }
     if (filters.dateRange?.to) {
-      clauses.push(lte(
-        transaction.dateRequest,
-        new Date(filters.dateRange.to)
-      ));
+      clauses.push(lte(transaction.dateRequest, new Date(filters.dateRange.to)));
     }
 
     const whereClause = clauses.length > 0 ? and(...clauses) : undefined;
