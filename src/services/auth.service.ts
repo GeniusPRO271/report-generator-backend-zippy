@@ -5,7 +5,11 @@ import { LoginInput } from '../types/zod/auth'
 const ACCESS_TOKEN_EXP = '1m'
 const REFRESH_TOKEN_EXP = '7d'
 const SECRET = process.env.SESSION_SECRET
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
 if (!SECRET) throw new Error('SESSION_SECRET must be set')
+if (!ADMIN_EMAIL) throw new Error('ADMIN_EMAIL must be set')
+if (!ADMIN_PASSWORD) throw new Error('ADMIN_PASSWORD must be set')
 
 const ENCODED_SECRET = new TextEncoder().encode(SECRET)
 
@@ -30,7 +34,7 @@ export class AuthService {
   async login(data: LoginInput) {
     const { email, password } = data
 
-    if (email !== 'admin@test.com' || password !== 'password') {
+    if (email !== ADMIN_EMAIL || password !== ADMIN_PASSWORD) {
       throw new Error('Invalid credentials')
     }
 
