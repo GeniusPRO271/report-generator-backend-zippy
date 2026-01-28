@@ -35,11 +35,11 @@ export class StatsService {
       providerId: filters.providerId ? [...filters.providerId].sort() : null,
       countryId: filters.countryId ? [...filters.countryId].sort() : null,
       payMethodId: filters.payMethodId ? [...filters.payMethodId].sort() : null,
-      from: filters.dateRange?.from
-        ? new Date(filters.dateRange.from).toISOString()
+      from: filters.from
+        ? new Date(filters.from).toISOString()
         : null,
-      to: filters.dateRange?.to
-        ? new Date(filters.dateRange.to).toISOString()
+      to: filters.to
+        ? new Date(filters.to).toISOString()
         : null,
     };
 
@@ -85,60 +85,79 @@ export class StatsService {
   }
 
   private async computeStats(filters: StatsFilterSchemaType) {
-    console.debug("[StatsService] Computing stats for filters:", filters);
+    console.debug("[StatsService] Computing stats for filters:", filters)
 
-    // Normalize filter arrays: always arrays, remove empty strings
+    // Normalize filter arrays and INCLUDE DATE
     const normalizedFilters: StatsFilterSchemaType = {
       ...filters,
       merchantId: filters.merchantId?.filter(Boolean) || undefined,
       providerId: filters.providerId?.filter(Boolean) || undefined,
       countryId: filters.countryId?.filter(Boolean) || undefined,
       payMethodId: filters.payMethodId?.filter(Boolean) || undefined,
-    };
-
-    const transactions = await this.transactionRepository.findWithFilter(normalizedFilters);
-    console.debug(`[StatsService] Found ${transactions.length} transactions`);
-
-    if (transactions.length === 0) {
-      console.debug("[StatsService] No transactions found, generating empty stats");
-      return this.statsGenerator.generate([]);
+      from: filters.from,
+      to: filters.to,
     }
 
-    const merchantIds = new Set(transactions.map(t => t.merchantId));
-    const providerIds = new Set(transactions.map(t => t.providerId));
-    const countryIds = new Set(transactions.map(t => t.countryId));
-    const payMethodIds = new Set(transactions.map(t => t.payMethodId));
+    console.debug(
+      "[StatsService] Normalized filters sent to repository:",
+      normalizedFilters
+    )
 
-    console.debug("[StatsService] Unique IDs:", {
-      merchantIds: [...merchantIds],
-      providerIds: [...providerIds],
-      countryIds: [...countryIds],
-      payMethodIds: [...payMethodIds],
-    });
+    const transactions =
+      await this.transactionRepository.findWithFilter(normalizedFilters)
 
-    const [merchants, providers, countries, payMethods] = await Promise.all([
-      merchantIds.size ? this.merchantRepository.findByIds([...merchantIds]) : [],
-      providerIds.size ? this.providerRepository.findByIds([...providerIds]) : [],
-      countryIds.size ? this.countryRepository.findByIds([...countryIds]) : [],
-      payMethodIds.size ? this.payMethodRepository.findByIds([...payMethodIds]) : [],
-    ]);
+    console.debug(
+      `[StatsService] Found ${transactions.length} transactions`
+    )
 
-    const merchantMap = new Map(merchants.map(m => [m.id, m]));
-    const providerMap = new Map(providers.map(p => [p.id, p]));
-    const countryMap = new Map(countries.map(c => [c.id, c]));
-    const payMethodMap = new Map(payMethods.map(p => [p.id, p]));
+    if (transactions.length === 0) {
+      console.debug(
+        "[StatsService] No transactions found, generating empty stats"
+      )
+      return this.statsGenerator.generate([])
+    }
 
-    const baseTransactions: BaseTransaction[] = [];
+    // --------- NO CHANGES BELOW THIS LINE ---------
+    const merchantIds = new Set(transactions.map((t) => t.merchantId))
+    const providerIds = new Set(transactions.map((t) => t.providerId))
+    const countryIds = new Set(transactions.map((t) => t.countryId))
+    const payMethodIds = new Set(transactions.map((t) => t.payMethodId))
+
+    const [merchants, providers, countries, payMethods] =
+      await Promise.all([
+        merchantIds.size
+          ? this.merchantRepository.findByIds([...merchantIds])
+          : [],
+        providerIds.size
+          ? this.providerRepository.findByIds([...providerIds])
+          : [],
+        countryIds.size
+          ? this.countryRepository.findByIds([...countryIds])
+          : [],
+        payMethodIds.size
+          ? this.payMethodRepository.findByIds([...payMethodIds])
+          : [],
+      ])
+
+    const merchantMap = new Map(merchants.map((m) => [m.id, m]))
+    const providerMap = new Map(providers.map((p) => [p.id, p]))
+    const countryMap = new Map(countries.map((c) => [c.id, c]))
+    const payMethodMap = new Map(payMethods.map((p) => [p.id, p]))
+
+    const baseTransactions: BaseTransaction[] = []
 
     for (const t of transactions) {
-      const merchant = merchantMap.get(t.merchantId);
-      const provider = providerMap.get(t.providerId);
-      const country = countryMap.get(t.countryId);
-      const payMethod = payMethodMap.get(t.payMethodId);
+      const merchant = merchantMap.get(t.merchantId)
+      const provider = providerMap.get(t.providerId)
+      const country = countryMap.get(t.countryId)
+      const payMethod = payMethodMap.get(t.payMethodId)
 
       if (!merchant || !provider || !country || !payMethod) {
-        console.warn("[StatsService] Skipping transaction due to missing entity:", { transactionId: t.id });
-        continue;
+        console.warn(
+          "[StatsService] Skipping transaction due to missing entity:",
+          { transactionId: t.id }
+        )
+        continue
       }
 
       baseTransactions.push({
@@ -162,12 +181,10 @@ export class StatsService {
         dateRequest: t.dateRequest,
         code: t.code,
         status: t.status,
-      });
+      })
     }
 
-    console.debug("[StatsService] Prepared base transactions:", baseTransactions.length);
-    const stats = this.statsGenerator.generate(baseTransactions);
-    console.debug("[StatsService] Generated stats object:", stats);
-    return stats;
+    const stats = this.statsGenerator.generate(baseTransactions)
+    return stats
   }
 }

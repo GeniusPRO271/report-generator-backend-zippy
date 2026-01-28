@@ -132,11 +132,11 @@ export class TransactionRepository {
       clauses.push(inArray(transaction.payMethodId, filters.payMethodId));
     }
 
-    if (filters.dateRange?.from) {
-      clauses.push(gte(transaction.dateRequest, new Date(filters.dateRange.from)));
+    if (filters.from) {
+      clauses.push(gte(transaction.dateRequest, new Date(filters.from)));
     }
-    if (filters.dateRange?.to) {
-      clauses.push(lte(transaction.dateRequest, new Date(filters.dateRange.to)));
+    if (filters.to) {
+      clauses.push(lte(transaction.dateRequest, new Date(filters.to)));
     }
 
     const whereClause = clauses.length > 0 ? and(...clauses) : undefined;
