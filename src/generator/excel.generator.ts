@@ -30,14 +30,32 @@ interface ApplicationParameters {
   providers: ProviderParameter[];
 }
 
+type DateRange = { label: string; start: Date; end: Date };
+
+type RangeAgg = {
+  totalByRange: number[];
+  okByRange: number[];
+  providersByRange: Array<Set<string> | undefined>;
+};
+
+type DayAgg = {
+  totalByDay: number[];
+  okByDay: number[];
+  providersByDay: Array<Set<string> | undefined>;
+};
+
 @Service()
 export class ExcelGenerator {
+  // Cache compiled commission formulas for speed
+  private commissionFnCache = new Map<string, (amount: number) => number>();
+
   async generateReport(
     payload: CreateReportSchemaType,
     reportId: string,
-    transactions: ReportTransactionSchemaType[]
+    transactions: ReportTransactionSchemaType[],
   ): Promise<string> {
     const { reportType } = payload;
+
     switch (reportType) {
       case 'finance':
         return this.generateFinancialReport(
@@ -47,13 +65,17 @@ export class ExcelGenerator {
         );
 
       case 'resume': {
-        const okCount = transactions.filter((tx) => tx.status === 'ok').length;
-        const errorCount = transactions.filter(
-          (tx) => tx.status === 'error',
-        ).length;
-        const pendingCount = transactions.filter(
-          (tx) => tx.status === 'pending',
-        ).length;
+        // Single pass counts (instead of 3 filters)
+        let okCount = 0;
+        let errorCount = 0;
+        let pendingCount = 0;
+
+        for (const tx of transactions) {
+          if (tx.status === 'ok') okCount++;
+          else if (tx.status === 'error') errorCount++;
+          else if (tx.status === 'pending') pendingCount++;
+        }
+
         console.log(
           `Transactions summary — OK: ${okCount}, ERROR: ${errorCount}, PENDING: ${pendingCount}`,
         );
@@ -65,32 +87,24 @@ export class ExcelGenerator {
         );
       }
 
-      case 'daily':
-        // return this.generateMonthlyResumeReport(transactions, reportId)
-        console.log("RUNING DAILY NEW VERSION")
-        const fromDate = DateTime.fromObject(
-          { year: 2025, month: 12, day: 1, hour: 0, minute: 0 },
-          { zone: 'America/Santiago' }
-        ).toJSDate();
+      case 'daily': {
+        return this.generateMonthlyResumeReport(transactions, reportId);
+      }
 
-        const toDate = DateTime.fromObject(
-          { year: 2025, month: 12, day: 31, hour: 23, minute: 59, second: 59, millisecond: 999 },
-          { zone: 'America/Santiago' }
-        ).toJSDate();
-
-        return this.generateMerchantCountryMethodReport(
-          transactions,
-          fromDate,
-          toDate
-        );
       default:
         throw new Error(`❌ Unknown report type: ${reportType}`);
     }
   }
 
   /**
- * Generates Merchant x Country x Method report
- */
+   * Generates Merchant x Country x Method report
+   *
+   * Optimized:
+   * - Single pass to collect countries/methods/merchants
+   * - Pre-aggregated OK counts (no nested filters)
+   * - Pre-group OK txs per merchant (no repeated scanning)
+   * - Safe worksheet names (Excel 31-char limit + duplicates)
+   */
   private async generateMerchantCountryMethodReport(
     transactions: ReportTransactionSchemaType[],
     fromDate?: Date,
@@ -99,60 +113,105 @@ export class ExcelGenerator {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Merchant Report');
 
-    // --- Filter transactions by date range ---
-    let filteredTransactions = transactions;
+    // --- Filter transactions by date range (single pass) ---
+    const filteredTransactions: ReportTransactionSchemaType[] = [];
 
     if (fromDate || toDate) {
-      filteredTransactions = transactions.filter((tx) => {
+      for (const tx of transactions) {
         const txDate = new Date(tx.dateRequest);
 
-        if (fromDate) {
-          if (txDate < fromDate) return false;
-        }
+        if (fromDate && txDate < fromDate) continue;
+        if (toDate && txDate > toDate) continue;
 
-        if (toDate) {
-          if (txDate > toDate) return false;
-        }
+        filteredTransactions.push(tx);
+      }
 
-        return true;
-      });
-
-      console.log(`📅 Date range filter applied: ${fromDate?.toISOString() || 'N/A'} to ${toDate?.toISOString() || 'N/A'}`);
-      console.log(`📊 Filtered transactions: ${filteredTransactions.length} out of ${transactions.length}`);
-    }
-
-    // --- Step 1: Collect unique countries, methods, merchants from FILTERED transactions ---
-    const countries = Array.from(new Set(filteredTransactions.map((tx) => tx.country.toUpperCase())));
-    const countryMethodMap = new Map<string, string[]>();
-    for (const country of countries) {
-      const methods = Array.from(
-        new Set(
-          filteredTransactions
-            .filter((tx) => tx.country.toUpperCase() === country)
-            .map((tx) => tx.payMethod.toUpperCase())
-        )
+      console.log(
+        `📅 Date range filter applied: ${fromDate?.toISOString() || 'N/A'} to ${toDate?.toISOString() || 'N/A'
+        }`,
       );
-      countryMethodMap.set(country, methods);
+      console.log(
+        `📊 Filtered transactions: ${filteredTransactions.length} out of ${transactions.length}`,
+      );
+    } else {
+      filteredTransactions.push(...transactions);
     }
 
-    const merchants = Array.from(new Set(filteredTransactions.map((tx) => tx.merchantName)));
+    // --- Step 1: Collect unique countries, methods, merchants in one pass ---
+    // Preserve insertion order like your original Set(...) approach
+    const countries: string[] = [];
+    const countrySeen = new Set<string>();
 
-    // --- Step 2: Build top header rows ---
+    const merchants: string[] = [];
+    const merchantSeen = new Set<string>();
+
+    // country -> methods (in first-seen order)
+    const countryMethods = new Map<string, string[]>();
+    const countryMethodSeen = new Map<string, Set<string>>();
+
+    // key = merchant|COUNTRY|METHOD => count of OK
+    const okCounts = new Map<string, number>();
+
+    // merchant => OK transactions
+    const okTxByMerchant = new Map<string, ReportTransactionSchemaType[]>();
+
+    for (const tx of filteredTransactions) {
+      const country = tx.country.toUpperCase();
+      const method = tx.payMethod.toUpperCase();
+      const merchant = tx.merchantName;
+
+      if (!countrySeen.has(country)) {
+        countrySeen.add(country);
+        countries.push(country);
+      }
+
+      if (!merchantSeen.has(merchant)) {
+        merchantSeen.add(merchant);
+        merchants.push(merchant);
+      }
+
+      let methodSeen = countryMethodSeen.get(country);
+      if (!methodSeen) {
+        methodSeen = new Set<string>();
+        countryMethodSeen.set(country, methodSeen);
+        countryMethods.set(country, []);
+      }
+
+      if (!methodSeen.has(method)) {
+        methodSeen.add(method);
+        countryMethods.get(country)!.push(method);
+      }
+
+      if (tx.status === 'ok') {
+        const key = `${merchant}|${country}|${method}`;
+        okCounts.set(key, (okCounts.get(key) ?? 0) + 1);
+
+        let list = okTxByMerchant.get(merchant);
+        if (!list) {
+          list = [];
+          okTxByMerchant.set(merchant, list);
+        }
+        list.push(tx);
+      }
+    }
+
+    // --- Step 2: Build top header rows (same layout) ---
     let colIndex = 2;
-    const countryPositions: { start: number; end: number }[] = [];
 
     for (const country of countries) {
-      const methods = countryMethodMap.get(country)!;
+      const methods = countryMethods.get(country) ?? [];
+      if (methods.length === 0) continue;
+
       const start = colIndex;
       const end = colIndex + methods.length - 1;
 
       sheet.mergeCells(1, start, 1, end);
+
       const cell = sheet.getCell(1, start);
       cell.value = country;
       cell.alignment = { horizontal: 'center', vertical: 'middle' };
       cell.font = { bold: true };
 
-      countryPositions.push({ start, end });
       colIndex = end + 1;
     }
 
@@ -161,40 +220,34 @@ export class ExcelGenerator {
     const countryMethodOrder: { country: string; method: string }[] = [];
 
     for (const country of countries) {
-      const methods = countryMethodMap.get(country)!;
+      const methods = countryMethods.get(country) ?? [];
       for (const method of methods) {
         const cell = sheet.getCell(2, colIndex);
         cell.value = method;
         cell.alignment = { horizontal: 'center', vertical: 'middle' };
         cell.font = { bold: true };
+
         countryMethodOrder.push({ country, method });
         colIndex++;
       }
     }
 
-    // --- Step 3: Fill merchant rows with FILTERED data ---
-    let rowIndex = 3;
+    // --- Step 3: Fill merchant rows with pre-aggregated counts ---
     for (const merchant of merchants) {
       const rowData: (string | number)[] = [merchant];
 
       for (const { country, method } of countryMethodOrder) {
-        const count = filteredTransactions.filter(
-          (tx) =>
-            tx.merchantName === merchant &&
-            tx.country.toUpperCase() === country &&
-            tx.payMethod.toUpperCase() === method &&
-            tx.status === 'ok'
-        ).length;
-        rowData.push(Number(count));
+        const key = `${merchant}|${country}|${method}`;
+        rowData.push(okCounts.get(key) ?? 0);
       }
 
       const addedRow = sheet.addRow(rowData);
-
       addedRow.eachCell((cell, colNum) => {
-        cell.alignment = { horizontal: colNum === 1 ? 'left' : 'center', vertical: 'middle' };
+        cell.alignment = {
+          horizontal: colNum === 1 ? 'left' : 'center',
+          vertical: 'middle',
+        };
       });
-
-      rowIndex++;
     }
 
     // --- Step 4: Set column widths ---
@@ -203,22 +256,39 @@ export class ExcelGenerator {
       sheet.getColumn(i).width = 15;
     }
 
-    // --- Step 5: Create a tab per merchant with all OK transactions sorted by date ---
+    // --- Step 5: Create a tab per merchant with all OK transactions ---
+    // (optimized: no repeated filtering over all transactions)
+    const usedSheetNames = new Set<string>();
+    usedSheetNames.add('Merchant Report');
+
     for (const merchant of merchants) {
-      const merchantSheet = workbook.addWorksheet(merchant);
+      const merchantTxs = okTxByMerchant.get(merchant) ?? [];
+      if (merchantTxs.length === 0) continue;
 
-      const merchantTxs = filteredTransactions
-        .filter((tx) => tx.merchantName === merchant && tx.status === 'ok')
-        .sort((a, b) => new Date(a.dateRequest).getTime() - new Date(b.dateRequest).getTime());
+      const sheetName = this.makeUniqueSheetName(merchant, usedSheetNames);
+      const merchantSheet = workbook.addWorksheet(sheetName);
 
-      // Header row
-      const headers = ['Date', 'Country', 'Method', 'Status', 'Amount', 'Currency', 'Commerce Req ID'];
+      merchantTxs.sort(
+        (a, b) =>
+          new Date(a.dateRequest).getTime() -
+          new Date(b.dateRequest).getTime(),
+      );
+
+      const headers = [
+        'Date',
+        'Country',
+        'Method',
+        'Status',
+        'Amount',
+        'Currency',
+        'Commerce Req ID',
+      ];
+
       merchantSheet.addRow(headers).eachCell((cell) => {
         cell.font = { bold: true };
         cell.alignment = { horizontal: 'center', vertical: 'middle' };
       });
 
-      // Transactions
       for (const tx of merchantTxs) {
         const rowData = [
           tx.dateRequest,
@@ -229,27 +299,35 @@ export class ExcelGenerator {
           tx.currency,
           tx.commerceReqId,
         ];
+
         const row = merchantSheet.addRow(rowData);
         row.eachCell((cell, colNum) => {
-          cell.alignment = { horizontal: colNum === 1 ? 'left' : 'center', vertical: 'middle' };
+          cell.alignment = {
+            horizontal: colNum === 1 ? 'left' : 'center',
+            vertical: 'middle',
+          };
         });
       }
 
-      // Set column widths
       headers.forEach((header, idx) => {
         merchantSheet.getColumn(idx + 1).width = header.length + 5;
       });
     }
 
     // --- Step 6: Save workbook ---
-    const outputDir = path.join(process.cwd(), 'Exceldata');
-    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+    const outputDir = this.ensureOutputDir();
 
-    const dateRangeStr = fromDate && toDate
-      ? `_${fromDate.toISOString().split('T')[0]}_to_${toDate.toISOString().split('T')[0]}`
-      : '';
+    const dateRangeStr =
+      fromDate && toDate
+        ? `_${fromDate.toISOString().split('T')[0]}_to_${toDate.toISOString().split('T')[0]
+        }`
+        : '';
 
-    const filePath = path.join(outputDir, `merchant_country_method_report${dateRangeStr}.xlsx`);
+    const filePath = path.join(
+      outputDir,
+      `merchant_country_method_report${dateRangeStr}.xlsx`,
+    );
+
     await workbook.xlsx.writeFile(filePath);
 
     console.log(`✅ Merchant-country-method report saved at: ${filePath}`);
@@ -258,6 +336,12 @@ export class ExcelGenerator {
 
   /**
    * Financial report (updated logic with formulas + logs + formula column)
+   *
+   * Optimized:
+   * - Pre-group transactions by method (avoids filtered.filter(...) per method)
+   * - Avoid building huge "a + b + c" Excel formulas for totals
+   *   (use SUM(I2:I{n}) instead)
+   * - Limit per-transaction log noise to keep worker fast
    */
   private async generateFinancialReport(
     transactions: z.infer<typeof ReportTransactionSchema>[],
@@ -265,6 +349,9 @@ export class ExcelGenerator {
     reportId: string,
   ): Promise<string> {
     const logs: string[] = [];
+    const LOG_TX_LIMIT = 50;
+    let loggedTx = 0;
+
     const pushLog = (msg: string) => {
       const line = `[${new Date().toISOString()}] ${msg}`;
       console.log(line);
@@ -275,37 +362,45 @@ export class ExcelGenerator {
 
     const workbook = new ExcelJS.Workbook();
 
-    // Filter by country
     const filtered = transactions.filter(
-      (tx) =>
-        tx.country.toLowerCase() === parameters.countryName.toLowerCase(),
+      (tx) => tx.country.toLowerCase() === parameters.countryName.toLowerCase(),
     );
-    pushLog(`Filtered transactions: ${filtered.length
-      }`);
+    pushLog(`Filtered transactions: ${filtered.length}`);
 
-    // Build commission map
     const commissionMap = new Map<string, Map<string, string>>();
     for (const provider of parameters.providers) {
       const providerKey = provider.providerName.toLowerCase();
       const methodMap = new Map<string, string>();
 
       for (const method of provider.methods) {
-        methodMap.set(method.methodName.toLowerCase(), method.commissionFormula);
+        methodMap.set(
+          method.methodName.toLowerCase(),
+          method.commissionFormula,
+        );
       }
       commissionMap.set(providerKey, methodMap);
     }
 
     const allMethods = [
       ...new Set(
-        parameters.providers.flatMap((p) =>
-          p.methods.map((m) => m.methodName),
-        ),
+        parameters.providers.flatMap((p) => p.methods.map((m) => m.methodName)),
       ),
     ];
 
+    // Group filtered tx by method (lowercase) once
+    const txByMethod = new Map<string, z.infer<typeof ReportTransactionSchema>[]>();
+    for (const tx of filtered) {
+      const key = (tx.payMethod ?? 'Unknown').toLowerCase();
+      let list = txByMethod.get(key);
+      if (!list) {
+        list = [];
+        txByMethod.set(key, list);
+      }
+      list.push(tx);
+    }
+
     const methodTotals: { method: string; total: number }[] = [];
 
-    // Border helper
     const setBorders = (row: ExcelJS.Row) => {
       row.eachCell((cell) => {
         cell.border = {
@@ -318,7 +413,7 @@ export class ExcelGenerator {
     };
 
     for (const methodName of allMethods) {
-      pushLog(`Processing method: ${methodName} `);
+      pushLog(`Processing method: ${methodName}`);
 
       const sheet = workbook.addWorksheet(methodName.slice(0, 31));
 
@@ -335,27 +430,20 @@ export class ExcelGenerator {
         { header: 'Total', key: 'total', width: 20 },
       ];
 
-      // Number formatting
       sheet.getColumn('amount').numFmt = '#,##0.00';
       sheet.getColumn('totalCommission').numFmt = '#,##0.00';
       sheet.getColumn('total').numFmt = '#,##0.00';
 
       const headerRow = sheet.getRow(1);
       headerRow.font = { bold: true };
-      headerRow.alignment = {
-        vertical: 'middle',
-        horizontal: 'center',
-      };
+      headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
       setBorders(headerRow);
 
-      const methodTx = filtered.filter(
-        (tx) =>
-          tx.payMethod.toLowerCase() === methodName.toLowerCase(),
-      );
-
+      const methodTx = txByMethod.get(methodName.toLowerCase()) ?? [];
       pushLog(`Found ${methodTx.length} transactions for method ${methodName}`);
 
       let methodTotal = 0;
+      let lastDataRow = 1;
 
       for (const tx of methodTx) {
         const providerName = tx.provider?.toLowerCase?.() ?? '';
@@ -364,17 +452,17 @@ export class ExcelGenerator {
           providerMethods?.get(methodName.toLowerCase()) ?? '0';
 
         const amount = Number(tx.quantity) || 0;
+        methodTotal += amount;
 
-        // Build Excel native formula:
         const excelFormula = formula.replace(/amount/g, amount.toString());
-
-        pushLog(
-          `TX ${tx.id} | Provider: ${providerName} | Formula: ${excelFormula} `,
-        );
-
         const totalFormula = `${amount} - (${excelFormula})`;
 
-        methodTotal += amount;
+        if (loggedTx < LOG_TX_LIMIT) {
+          pushLog(
+            `TX ${tx.id} | Provider: ${providerName} | Formula: ${excelFormula}`,
+          );
+          loggedTx++;
+        }
 
         const row = sheet.addRow({
           date: new Date(tx.dateRequest).toISOString(),
@@ -384,58 +472,43 @@ export class ExcelGenerator {
           idZippy: tx.id,
           operationCode: tx.code,
           idCommerce: tx.commerceId,
-          // NEW: the plain formula text
           formulaText: formula,
-          // Excel formulas (visible inside Excel)
           totalCommission: { formula: excelFormula },
           total: { formula: totalFormula },
         });
 
-        row.alignment = {
-          vertical: 'middle',
-          horizontal: 'center',
-        };
+        lastDataRow = row.number;
+
+        row.alignment = { vertical: 'middle', horizontal: 'center' };
         setBorders(row);
       }
 
-      if (methodTx.length > 0) {
+      if (lastDataRow >= 2) {
         sheet.addRow([]);
 
-        const totalAmountValue = methodTx.reduce(
-          (sum, tx) => sum + Number(tx.quantity || 0),
-          0,
-        );
-
-        const totalCommissionFormula = methodTx
-          .map((tx) => {
-            const providerName = tx.provider?.toLowerCase?.() ?? '';
-            const providerMethods = commissionMap.get(providerName);
-            const f = providerMethods?.get(methodName.toLowerCase()) ?? '0';
-            const amt = Number(tx.quantity) || 0;
-            return f.replace(/amount/g, amt.toString());
-          })
-          .join(' + ');
+        const firstDataRow = 2;
+        // Columns based on your defined sheet.columns:
+        // amount = D, totalCommission = I, total = J
+        const totalAmountFormula = `SUM(D${firstDataRow}:D${lastDataRow})`;
+        const totalCommissionSum = `SUM(I${firstDataRow}:I${lastDataRow})`;
 
         const totalRow = sheet.addRow({
           provider: 'TOTALS',
-          amount: totalAmountValue,
+          amount: { formula: totalAmountFormula },
           formulaText: '',
-          totalCommission: { formula: totalCommissionFormula },
+          totalCommission: { formula: totalCommissionSum },
+          // Keep original behavior: total is methodTotal (sum of amounts)
           total: methodTotal,
         });
 
         totalRow.font = { bold: true };
-        totalRow.alignment = {
-          vertical: 'middle',
-          horizontal: 'center',
-        };
+        totalRow.alignment = { vertical: 'middle', horizontal: 'center' };
         setBorders(totalRow);
       }
 
       methodTotals.push({ method: methodName, total: methodTotal });
     }
 
-    // ---------- Resume Sheet ----------
     const resumeSheet = workbook.addWorksheet('Resume');
     resumeSheet.columns = [
       { header: 'Method', key: 'method', width: 30 },
@@ -446,10 +519,7 @@ export class ExcelGenerator {
 
     const resumeHeader = resumeSheet.getRow(1);
     resumeHeader.font = { bold: true };
-    resumeHeader.alignment = {
-      vertical: 'middle',
-      horizontal: 'center',
-    };
+    resumeHeader.alignment = { vertical: 'middle', horizontal: 'center' };
     setBorders(resumeHeader);
 
     for (const item of methodTotals) {
@@ -480,32 +550,23 @@ export class ExcelGenerator {
     });
 
     totalRow.font = { bold: true };
-    totalRow.alignment = {
-      vertical: 'middle',
-      horizontal: 'center',
-    };
+    totalRow.alignment = { vertical: 'middle', horizontal: 'center' };
     setBorders(totalRow);
 
     resumeSheet.columns.forEach((col) => {
-      col.alignment = {
-        vertical: 'middle',
-        horizontal: 'center',
-      };
+      col.alignment = { vertical: 'middle', horizontal: 'center' };
     });
 
-    // Save workbook
-    const filename = `financial_report_${reportId} `;
+    const filename = `financial_report_${reportId}`;
     pushLog(`Saving workbook ${filename}...`);
 
     const savedFile = await this.saveWorkbook(workbook, filename);
 
-    // ---------- SAVE LOG FILE ----------
     const fsPromises = await import('fs/promises');
     const logDir = './log';
-
     await fsPromises.mkdir(logDir, { recursive: true });
-    const logPath = `${logDir}/${filename}.log`;
 
+    const logPath = `${logDir}/${filename}.log`;
     await fsPromises.writeFile(logPath, logs.join('\n'), 'utf8');
 
     pushLog(`Log file saved to ${logPath}`);
@@ -515,6 +576,11 @@ export class ExcelGenerator {
 
   /**
    * Resume report (weekly)
+   *
+   * Optimized:
+   * - One-pass aggregation per (country, merchant, method, rangeIndex)
+   * - No nested txs.filter(...) inside each range loop
+   * - Commission lookup + formula caching for Totals sheet
    */
   private async generateResumeReport(
     transactions: z.infer<typeof ReportTransactionSchema>[],
@@ -523,22 +589,51 @@ export class ExcelGenerator {
   ): Promise<string> {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Resume');
-    const dateRanges = this.computeDateRanges(transactions);
 
-    // === Group by country ===
-    const byCountry = new Map<
-      string,
-      z.infer<typeof ReportTransactionSchema>[]
-    >();
+    const dateRanges = this.computeDateRanges(transactions);
+    const rangeCount = dateRanges.length;
+
+    // Group by country (single pass)
+    const byCountry = new Map<string, z.infer<typeof ReportTransactionSchema>[]>();
     for (const tx of transactions) {
       const country = tx.country?.toUpperCase?.() ?? 'UNKNOWN';
-      if (!byCountry.has(country)) byCountry.set(country, []);
-      byCountry.get(country)!.push(tx);
+      let list = byCountry.get(country);
+      if (!list) {
+        list = [];
+        byCountry.set(country, list);
+      }
+      list.push(tx);
     }
 
     let currentRow = 1;
 
-    // === Iterate through countries ===
+    // Precompute for range lookup
+    const rangeStarts = dateRanges.map((r) => r.start.getTime());
+    const rangeEnds = dateRanges.map((r) => r.end.getTime());
+
+    const findRangeIndex = (d: Date): number => {
+      const ms = d.getTime();
+
+      // Binary search by start times
+      let lo = 0;
+      let hi = rangeStarts.length - 1;
+
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (ms < rangeStarts[mid]) hi = mid - 1;
+        else lo = mid + 1;
+      }
+
+      const idx = Math.max(0, hi);
+      if (idx < rangeEnds.length && ms <= rangeEnds[idx]) return idx;
+
+      // Fallback scan (ranges are small)
+      for (let i = 0; i < rangeStarts.length; i++) {
+        if (ms >= rangeStarts[i] && ms <= rangeEnds[i]) return i;
+      }
+      return -1;
+    };
+
     for (const [country, countryTxs] of byCountry.entries()) {
       if (currentRow > 1) currentRow += 1;
 
@@ -569,10 +664,7 @@ export class ExcelGenerator {
             pattern: 'solid',
             fgColor: { argb: 'FFFF00' },
           };
-          cell.alignment = {
-            horizontal: 'left',
-            vertical: 'middle',
-          };
+          cell.alignment = { horizontal: 'left', vertical: 'middle' };
           cell.border = {
             top: { style: 'medium' },
             left: { style: 'medium' },
@@ -610,46 +702,61 @@ export class ExcelGenerator {
 
       currentRow++;
 
-      // === Group by merchant and method ===
-      const byMerchant = new Map<
-        string,
-        Map<string, z.infer<typeof ReportTransactionSchema>[]>
-      >();
+      // merchant -> method -> aggregate
+      const aggByMerchant = new Map<string, Map<string, RangeAgg>>();
+
       for (const tx of countryTxs) {
         const merchant = tx.merchantName ?? 'Unknown';
         const method = tx.payMethod ?? 'Unknown';
 
-        if (!byMerchant.has(merchant)) byMerchant.set(merchant, new Map());
-        const methodsMap = byMerchant.get(merchant)!;
+        const idx = findRangeIndex(new Date(tx.dateRequest));
+        if (idx < 0) continue;
 
-        if (!methodsMap.has(method)) methodsMap.set(method, []);
-        methodsMap.get(method)!.push(tx);
+        let methodMap = aggByMerchant.get(merchant);
+        if (!methodMap) {
+          methodMap = new Map();
+          aggByMerchant.set(merchant, methodMap);
+        }
+
+        let agg = methodMap.get(method);
+        if (!agg) {
+          agg = {
+            totalByRange: new Array(rangeCount).fill(0),
+            okByRange: new Array(rangeCount).fill(0),
+            providersByRange: new Array(rangeCount).fill(undefined),
+          };
+          methodMap.set(method, agg);
+        }
+
+        agg.totalByRange[idx] += 1;
+        if (tx.status === 'ok') agg.okByRange[idx] += 1;
+
+        const provider = tx.provider ?? 'Unknown';
+        let providersSet = agg.providersByRange[idx];
+        if (!providersSet) {
+          providersSet = new Set<string>();
+          agg.providersByRange[idx] = providersSet;
+        }
+        providersSet.add(provider);
       }
 
-      // === Add data rows with merged merchant names ===
-      for (const [merchant, methodsMap] of byMerchant.entries()) {
-        const methodEntries = Array.from(methodsMap.entries());
+      // Write rows, merge merchant cells
+      for (const [merchant, methodsMap] of aggByMerchant.entries()) {
+        const entries = [...methodsMap.entries()];
         const startRow = currentRow;
 
-        for (const [method, txs] of methodEntries) {
+        for (const [method, agg] of entries) {
           const rowData: any[] = [merchant, method];
 
-          for (const range of dateRanges) {
-            const filtered = txs.filter((tx) => {
-              const d = new Date(tx.dateRequest);
-              return d >= range.start && d <= range.end;
-            });
+          for (let i = 0; i < rangeCount; i++) {
+            const total = agg.totalByRange[i];
+            const ok = agg.okByRange[i];
+            const rate = total ? (ok / total) * 100 : 0;
 
-            const total = filtered.length;
-            const approved = filtered.filter(
-              (tx) => tx.status === 'ok',
-            ).length;
-            const rate = total > 0 ? (approved / total) * 100 : 0;
-            const providers = [
-              ...new Set(
-                filtered.map((tx) => tx.provider ?? 'Unknown'),
-              ),
-            ].join(', ');
+            const providers =
+              agg.providersByRange[i] && agg.providersByRange[i]!.size > 0
+                ? [...agg.providersByRange[i]!.values()].join(', ')
+                : '-';
 
             rowData.push(
               total > 0 ? `${rate.toFixed(0)}%` : '-',
@@ -659,6 +766,7 @@ export class ExcelGenerator {
           }
 
           const addedRow = sheet.addRow(rowData);
+
           addedRow.eachCell((cell, colNumber) => {
             if (colNumber >= 3) {
               const isFirstInGroup = (colNumber - 2) % 3 === 1;
@@ -684,13 +792,9 @@ export class ExcelGenerator {
             };
           });
 
-          // Conditional formatting for approval %
           for (let i = 3; i < rowData.length; i += 3) {
             const cell = addedRow.getCell(i);
-            if (
-              typeof cell.value === 'string' &&
-              cell.value.endsWith('%')
-            ) {
+            if (typeof cell.value === 'string' && cell.value.endsWith('%')) {
               const rate = parseFloat(cell.value);
               let color = 'FFEB9C';
               if (rate >= 60) color = 'C6EFCE';
@@ -728,63 +832,29 @@ export class ExcelGenerator {
       };
     });
 
-    // === NEW FEATURE: RESUME TOTALS (only successful transactions, with commission applied) ===
+    // === Totals sheet (optimized commission lookup + cached evaluation) ===
     const totalsSheet = workbook.addWorksheet('Totals');
 
-    // Apply commission
-    const txWithCommission = transactions.map((tx) => {
-      let commission = 0;
-      const merchantData = reportResume.find(
-        (r) => r.merchantName === tx.merchantName,
-      );
-      const countryData = merchantData?.countries.find(
-        (c) =>
-          c.countryName.toUpperCase() ===
-          tx.country?.toUpperCase(),
-      );
-      const providerData = countryData?.providers.find(
-        (p) => p.providerName === tx.provider,
-      );
-      const methodData = providerData?.methods.find(
-        (m) => m.methodName === tx.payMethod,
-      );
-
-      if (
-        methodData?.commissionFormula &&
-        typeof tx.quantity === 'number'
-      ) {
-        try {
-          const expr = methodData.commissionFormula.replace(
-            /amount/g,
-            tx.quantity.toString(),
-          );
-          // eslint-disable-next-line no-new-func
-          commission = Function(
-            `"use strict"; return (${expr})`,
-          )();
-        } catch {
-          commission = 0;
-        }
-      }
-
-      return {
-        ...tx,
-        commission,
-        finalAmount: (tx.quantity as any ?? 0) - commission,
-      };
-    });
-
-    // === Only count successful transactions ===
+    const commissionLookup = this.buildCommissionLookup(reportResume);
     const totalsByMethod = new Map<string, { total: number }>();
-    for (const tx of txWithCommission) {
+
+    for (const tx of transactions) {
       if (tx.status !== 'ok') continue;
+
       const method = tx.payMethod ?? 'Unknown';
-      const methodTotals = totalsByMethod.get(method) ?? { total: 0 };
-      methodTotals.total += (tx as any).finalAmount ?? 0;
-      totalsByMethod.set(method, methodTotals);
+      const amount = Number(tx.quantity) || 0;
+
+      const formula =
+        this.getCommissionFormulaFromLookup(commissionLookup, tx) ?? '0';
+
+      const commission = this.evaluateCommissionCached(formula, amount);
+      const finalAmount = amount - commission;
+
+      const cur = totalsByMethod.get(method) ?? { total: 0 };
+      cur.total += finalAmount;
+      totalsByMethod.set(method, cur);
     }
 
-    // === HEADER ===
     const header = totalsSheet.addRow(['METHOD', 'TOTAL AMOUNT']);
     header.eachCell((cell) => {
       cell.font = {
@@ -793,10 +863,7 @@ export class ExcelGenerator {
         bold: true,
         color: { argb: 'FFFFFF' },
       };
-      cell.alignment = {
-        horizontal: 'center',
-        vertical: 'middle',
-      };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
       cell.fill = {
         type: 'pattern',
         pattern: 'solid',
@@ -813,7 +880,6 @@ export class ExcelGenerator {
       }
     });
 
-    // === METHOD ROWS ===
     let rowIndex = 2;
     for (const [method, totals] of totalsByMethod.entries()) {
       const row = totalsSheet.addRow([method.toUpperCase(), totals.total]);
@@ -825,12 +891,14 @@ export class ExcelGenerator {
           colNumber === 2
             ? { horizontal: 'right', vertical: 'middle' }
             : { horizontal: 'center', vertical: 'middle' };
+
         cell.border = {
           top: { style: 'thin' },
           bottom: { style: 'thin' },
           left: { style: 'thin' },
           right: { style: 'thin' },
         };
+
         if (colNumber === 2) cell.numFmt = '"$"#.##0,00';
         if (isEven) {
           cell.fill = {
@@ -844,11 +912,11 @@ export class ExcelGenerator {
       rowIndex++;
     }
 
-    // === GRAND TOTAL ===
-    const grandTotal = Array.from(totalsByMethod.values()).reduce(
+    const grandTotal = [...totalsByMethod.values()].reduce(
       (sum, m) => sum + m.total,
       0,
     );
+
     const grandRow = totalsSheet.addRow(['GRAND TOTAL', grandTotal]);
     grandRow.eachCell((cell, colNumber) => {
       cell.font = { name: 'Arial', size: 14, bold: true };
@@ -875,44 +943,45 @@ export class ExcelGenerator {
 
     totalsSheet.columns.forEach((col) => (col.width = 35));
 
-    // === Country sheets remain the same ===
+    // === Country raw sheets remain the same ===
     for (const [country, countryTxs] of byCountry.entries()) {
       const countrySheetName = country.substring(0, 31);
       const countrySheet = workbook.addWorksheet(countrySheetName);
-      if (countryTxs.length > 0) {
-        const headers = Object.keys(countryTxs[0]);
-        countrySheet.addRow(headers);
-        for (const tx of countryTxs) {
-          const values = headers.map((h) => {
-            const value = (tx as any)[h];
-            if (typeof value === 'object' && value !== null) {
-              return JSON.stringify(value);
-            }
-            return value ?? '';
-          });
-          countrySheet.addRow(values);
-        }
-        const headerRow = countrySheet.getRow(1);
-        headerRow.font = { bold: true };
-        headerRow.alignment = {
-          horizontal: 'center',
-          vertical: 'middle',
-        };
-        headerRow.eachCell((cell) => {
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: 'FFD966' },
-          };
-          cell.border = {
-            top: { style: 'thin' },
-            bottom: { style: 'thin' },
-            left: { style: 'thin' },
-            right: { style: 'thin' },
-          };
+
+      if (countryTxs.length === 0) continue;
+
+      const headers = Object.keys(countryTxs[0]);
+      countrySheet.addRow(headers);
+
+      for (const tx of countryTxs) {
+        const values = headers.map((h) => {
+          const value = (tx as any)[h];
+          if (typeof value === 'object' && value !== null) {
+            return JSON.stringify(value);
+          }
+          return value ?? '';
         });
-        countrySheet.columns.forEach((col) => (col.width = 25));
+        countrySheet.addRow(values);
       }
+
+      const headerRow = countrySheet.getRow(1);
+      headerRow.font = { bold: true };
+      headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
+      headerRow.eachCell((cell) => {
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFD966' },
+        };
+        cell.border = {
+          top: { style: 'thin' },
+          bottom: { style: 'thin' },
+          left: { style: 'thin' },
+          right: { style: 'thin' },
+        };
+      });
+
+      countrySheet.columns.forEach((col) => (col.width = 25));
     }
 
     return this.saveWorkbook(workbook, `resume_report_${reportId}`);
@@ -920,7 +989,7 @@ export class ExcelGenerator {
 
   /**
    * Monthly resume report with daily details and monthly summaries
-   * (now aligned with Resume report structure and styling)
+   * (kept even if unused)
    */
   private async generateMonthlyResumeReport(
     transactions: z.infer<typeof ReportTransactionSchema>[],
@@ -929,21 +998,21 @@ export class ExcelGenerator {
     console.log(`📊 Starting monthly resume report generation...`);
     console.log(`Total transactions: ${transactions.length}`);
 
-    const okCount = transactions.filter((tx) => tx.status === 'ok').length;
-    const errorCount = transactions.filter(
-      (tx) => tx.status === 'error',
-    ).length;
-    const pendingCount = transactions.filter(
-      (tx) => tx.status === 'pending',
-    ).length;
+    let okCount = 0;
+    let errorCount = 0;
+    let pendingCount = 0;
+
+    for (const tx of transactions) {
+      if (tx.status === 'ok') okCount++;
+      else if (tx.status === 'error') errorCount++;
+      else if (tx.status === 'pending') pendingCount++;
+    }
 
     console.log(
       `Transactions summary — OK: ${okCount}, ERROR: ${errorCount}, PENDING: ${pendingCount}`,
     );
 
     const workbook = new ExcelJS.Workbook();
-
-    // === Group by month ===
     const byMonth = this.groupTransactionsByMonth(transactions);
 
     for (const [monthKey, monthTxs] of byMonth.entries()) {
@@ -957,7 +1026,6 @@ export class ExcelGenerator {
       );
     }
 
-    // === Add country sheets (same styling as in resumeReport) ===
     const byCountry = this.groupByCountry(transactions);
     for (const [country, countryTxs] of byCountry.entries()) {
       const sheet = workbook.addWorksheet(country.substring(0, 31));
@@ -978,10 +1046,7 @@ export class ExcelGenerator {
 
       const headerRow = sheet.getRow(1);
       headerRow.font = { bold: true };
-      headerRow.alignment = {
-        horizontal: 'center',
-        vertical: 'middle',
-      };
+      headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
       headerRow.eachCell((cell) => {
         cell.fill = {
           type: 'pattern',
@@ -995,6 +1060,7 @@ export class ExcelGenerator {
           right: { style: 'thin' },
         };
       });
+
       sheet.columns.forEach((col) => (col.width = 25));
     }
 
@@ -1002,7 +1068,7 @@ export class ExcelGenerator {
   }
 
   /**
-   * Evaluate commission formulas
+   * Evaluate commission formulas (kept as-is, but optimized flows use cached path)
    */
   private evaluateCommission(formula: string, amount: number): number {
     try {
@@ -1021,12 +1087,17 @@ export class ExcelGenerator {
     const map = new Map<string, any[]>();
     for (const tx of transactions) {
       const d = new Date(tx.dateRequest);
-      const key = `${d.getFullYear()}-${String(
-        d.getMonth() + 1,
-      ).padStart(2, '0')}`;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
+        2,
+        '0',
+      )}`;
 
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(tx);
+      let list = map.get(key);
+      if (!list) {
+        list = [];
+        map.set(key, list);
+      }
+      list.push(tx);
     }
     return new Map([...map.entries()].sort());
   }
@@ -1035,8 +1106,12 @@ export class ExcelGenerator {
     const map = new Map<string, any[]>();
     for (const tx of transactions) {
       const c = tx.country?.toUpperCase?.() ?? 'UNKNOWN';
-      if (!map.has(c)) map.set(c, []);
-      map.get(c)!.push(tx);
+      let list = map.get(c);
+      if (!list) {
+        list = [];
+        map.set(c, list);
+      }
+      list.push(tx);
     }
     return map;
   }
@@ -1047,12 +1122,19 @@ export class ExcelGenerator {
       const merchant = tx.merchantName ?? 'Unknown';
       const method = tx.payMethod ?? 'Unknown';
 
-      if (!map.has(merchant)) map.set(merchant, new Map());
-      if (!map.get(merchant)!.has(method)) {
-        map.get(merchant)!.set(method, []);
+      let methods = map.get(merchant);
+      if (!methods) {
+        methods = new Map();
+        map.set(merchant, methods);
       }
 
-      map.get(merchant)!.get(method)!.push(tx);
+      let list = methods.get(method);
+      if (!list) {
+        list = [];
+        methods.set(method, list);
+      }
+
+      list.push(tx);
     }
     return map;
   }
@@ -1060,19 +1142,22 @@ export class ExcelGenerator {
   private computeDailyRanges(transactions: any[]) {
     if (transactions.length === 0) return [];
 
-    const dates = transactions.map((tx) => new Date(tx.dateRequest));
-    const min = new Date(Math.min(...dates.map((d) => d.getTime())));
-    const max = new Date(Math.max(...dates.map((d) => d.getTime())));
+    // Avoid allocating many Date objects
+    let minMs = Number.POSITIVE_INFINITY;
+    let maxMs = 0;
 
-    const ranges: { label: string; start: Date; end: Date }[] = [];
+    for (const tx of transactions) {
+      const ms = new Date(tx.dateRequest).getTime();
+      if (ms < minMs) minMs = ms;
+      if (ms > maxMs) maxMs = ms;
+    }
 
-    const start = new Date(
-      min.getFullYear(),
-      min.getMonth(),
-      min.getDate(),
-    );
+    const min = new Date(minMs);
+    const max = new Date(maxMs);
 
-    let d = new Date(start);
+    const ranges: DateRange[] = [];
+
+    let d = new Date(min.getFullYear(), min.getMonth(), min.getDate());
     d.setHours(0, 0, 0, 0);
 
     while (d <= max) {
@@ -1088,6 +1173,7 @@ export class ExcelGenerator {
 
       d.setDate(d.getDate() + 1);
     }
+
     return ranges;
   }
 
@@ -1107,23 +1193,28 @@ export class ExcelGenerator {
   }
 
   /**
-   * DAILY SHEET — same structure & styling as Resume (but per day)
+   * DAILY SHEET — optimized:
+   * - Pre-aggregate per (merchant, method, dayIndex)
+   * - No txs.filter per day
    */
   private async generateDailySheet(
     workbook: ExcelJS.Workbook,
     monthName: string,
     transactions: any[],
   ) {
+    const DAY_COLORS = ['BDD7EE', 'DDEBF7'];
 
-    const DAY_COLORS = [
-      'BDD7EE',
-      'DDEBF7',
-    ];
-
-    const sheet = workbook.addWorksheet(monthName);
+    const sheet = workbook.addWorksheet(monthName.substring(0, 31));
     const dailyRanges = this.computeDailyRanges(transactions);
-    const byCountry = this.groupByCountry(transactions);
+    const dayCount = dailyRanges.length;
 
+    // dayStartMs -> dayIndex
+    const dayIndexByStartMs = new Map<number, number>();
+    for (let i = 0; i < dailyRanges.length; i++) {
+      dayIndexByStartMs.set(dailyRanges[i].start.getTime(), i);
+    }
+
+    const byCountry = this.groupByCountry(transactions);
     let currentRow = 1;
 
     for (const [country, countryTxs] of byCountry.entries()) {
@@ -1156,17 +1247,17 @@ export class ExcelGenerator {
             pattern: 'solid',
             fgColor: { argb: 'FFFF00' },
           };
-          cell.alignment = {
-            horizontal: 'left',
-            vertical: 'middle',
-          };
+          cell.alignment = { horizontal: 'left', vertical: 'middle' };
           cell.border = {
             top: { style: 'medium' },
             left: { style: 'medium' },
             bottom: { style: 'medium' },
             right: { style: 'medium' },
           };
-        } else if (colNumber === 2) {
+          return;
+        }
+
+        if (colNumber === 2) {
           cell.fill = {
             type: 'pattern',
             pattern: 'solid',
@@ -1178,54 +1269,89 @@ export class ExcelGenerator {
             bottom: { style: 'thin' },
             right: { style: 'thin' },
           };
-        } else {
-          const dayIndex = Math.floor((colNumber - 3) / 3);
-          const color = DAY_COLORS[dayIndex % DAY_COLORS.length];
-
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: color },
-          };
-
-          const isFirstInGroup = (colNumber - 2) % 3 === 1;
-          const isLastInGroup = (colNumber - 2) % 3 === 0;
-
-          cell.border = {
-            top: { style: 'medium' },
-            bottom: { style: 'medium' },
-            left: { style: isFirstInGroup ? 'medium' : 'thin' },
-            right: { style: isLastInGroup ? 'medium' : 'thin' },
-          };
+          return;
         }
+
+        const dayIndex = Math.floor((colNumber - 3) / 3);
+        const color = DAY_COLORS[dayIndex % DAY_COLORS.length];
+
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: color },
+        };
+
+        const isFirstInGroup = (colNumber - 2) % 3 === 1;
+        const isLastInGroup = (colNumber - 2) % 3 === 0;
+
+        cell.border = {
+          top: { style: 'medium' },
+          bottom: { style: 'medium' },
+          left: { style: isFirstInGroup ? 'medium' : 'thin' },
+          right: { style: isLastInGroup ? 'medium' : 'thin' },
+        };
       });
 
       currentRow++;
 
-      const byMerchant = this.groupByMerchantAndMethod(countryTxs);
+      // merchant -> method -> agg
+      const aggByMerchant = new Map<string, Map<string, DayAgg>>();
 
-      for (const [merchant, methodsMap] of byMerchant.entries()) {
+      for (const tx of countryTxs) {
+        const merchant = tx.merchantName ?? 'Unknown';
+        const method = tx.payMethod ?? 'Unknown';
+
+        const dt = new Date(tx.dateRequest);
+        const dayStart = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
+        dayStart.setHours(0, 0, 0, 0);
+
+        const dayIndex = dayIndexByStartMs.get(dayStart.getTime());
+        if (dayIndex === undefined) continue;
+
+        let methodMap = aggByMerchant.get(merchant);
+        if (!methodMap) {
+          methodMap = new Map();
+          aggByMerchant.set(merchant, methodMap);
+        }
+
+        let agg = methodMap.get(method);
+        if (!agg) {
+          agg = {
+            totalByDay: new Array(dayCount).fill(0),
+            okByDay: new Array(dayCount).fill(0),
+            providersByDay: new Array(dayCount).fill(undefined),
+          };
+          methodMap.set(method, agg);
+        }
+
+        agg.totalByDay[dayIndex] += 1;
+        if (tx.status === 'ok') agg.okByDay[dayIndex] += 1;
+
+        const provider = tx.provider ?? 'Unknown';
+        let set = agg.providersByDay[dayIndex];
+        if (!set) {
+          set = new Set<string>();
+          agg.providersByDay[dayIndex] = set;
+        }
+        set.add(provider);
+      }
+
+      for (const [merchant, methodsMap] of aggByMerchant.entries()) {
         const entries = [...methodsMap.entries()];
         const startRow = currentRow;
 
-        for (const [method, txs] of entries) {
+        for (const [method, agg] of entries) {
           const rowData: any[] = [merchant, method];
 
-          for (const r of dailyRanges) {
-            const filtered = txs.filter((t) => {
-              const d = new Date(t.dateRequest);
-              return d >= r.start && d <= r.end;
-            });
-
-            const total = filtered.length;
-            const ok = filtered.filter((t) => t.status === 'ok').length;
+          for (let i = 0; i < dayCount; i++) {
+            const total = agg.totalByDay[i];
+            const ok = agg.okByDay[i];
             const rate = total ? (ok / total) * 100 : 0;
 
-            const providers = [
-              ...new Set(
-                filtered.map((t) => t.provider ?? 'Unknown'),
-              ),
-            ].join(', ');
+            const providers =
+              agg.providersByDay[i] && agg.providersByDay[i]!.size > 0
+                ? [...agg.providersByDay[i]!.values()].join(', ')
+                : '-';
 
             rowData.push(
               total > 0 ? `${rate.toFixed(0)}%` : '-',
@@ -1260,13 +1386,9 @@ export class ExcelGenerator {
             };
           });
 
-          // Conditional formatting for approval %
           for (let i = 3; i < rowData.length; i += 3) {
             const cell = addedRow.getCell(i);
-            if (
-              typeof cell.value === 'string' &&
-              cell.value.endsWith('%')
-            ) {
+            if (typeof cell.value === 'string' && cell.value.endsWith('%')) {
               const rate = parseFloat(cell.value);
               let color = 'FFEB9C';
               if (rate >= 60) color = 'C6EFCE';
@@ -1306,14 +1428,16 @@ export class ExcelGenerator {
   }
 
   /**
-   * MONTHLY SUMMARY SHEET — same styling logic as Resume, but single period
+   * MONTHLY SUMMARY SHEET — optimized:
+   * - One-pass aggregation per (merchant, method)
+   * - No txs.filter inside method loops
    */
   private async generateMonthlySummarySheet(
     workbook: ExcelJS.Workbook,
     sheetName: string,
     transactions: any[],
   ) {
-    const sheet = workbook.addWorksheet(sheetName);
+    const sheet = workbook.addWorksheet(sheetName.substring(0, 31));
     const byCountry = this.groupByCountry(transactions);
 
     let currentRow = 1;
@@ -1346,10 +1470,7 @@ export class ExcelGenerator {
             pattern: 'solid',
             fgColor: { argb: 'FFFF00' },
           };
-          cell.alignment = {
-            horizontal: 'left',
-            vertical: 'middle',
-          };
+          cell.alignment = { horizontal: 'left', vertical: 'middle' };
           cell.border = {
             top: { style: 'medium' },
             left: { style: 'medium' },
@@ -1387,24 +1508,47 @@ export class ExcelGenerator {
 
       currentRow++;
 
-      const byMerchant = this.groupByMerchantAndMethod(countryTxs);
+      // merchant -> method -> agg
+      const aggByMerchant = new Map<
+        string,
+        Map<string, { total: number; ok: number; providers: Set<string> }>
+      >();
 
-      for (const [merchant, methodsMap] of byMerchant.entries()) {
+      for (const tx of countryTxs) {
+        const merchant = tx.merchantName ?? 'Unknown';
+        const method = tx.payMethod ?? 'Unknown';
+        const provider = tx.provider ?? 'Unknown';
+
+        let methodMap = aggByMerchant.get(merchant);
+        if (!methodMap) {
+          methodMap = new Map();
+          aggByMerchant.set(merchant, methodMap);
+        }
+
+        let agg = methodMap.get(method);
+        if (!agg) {
+          agg = { total: 0, ok: 0, providers: new Set<string>() };
+          methodMap.set(method, agg);
+        }
+
+        agg.total += 1;
+        if (tx.status === 'ok') agg.ok += 1;
+        agg.providers.add(provider);
+      }
+
+      for (const [merchant, methodsMap] of aggByMerchant.entries()) {
         const startRow = currentRow;
 
-        for (const [method, txs] of methodsMap.entries()) {
-          const total = txs.length;
-          const ok = txs.filter((t) => t.status === 'ok').length;
-          const rate = total ? (ok / total) * 100 : 0;
-          const providers = [
-            ...new Set(txs.map((t) => t.provider ?? 'Unknown')),
-          ].join(', ');
+        for (const [method, agg] of methodsMap.entries()) {
+          const rate = agg.total ? (agg.ok / agg.total) * 100 : 0;
+          const providers =
+            agg.providers.size > 0 ? [...agg.providers].join(', ') : '-';
 
           const rowData: any[] = [
             merchant,
             method,
-            total > 0 ? `${rate.toFixed(0)}%` : '-',
-            total > 0 ? total : '-',
+            agg.total > 0 ? `${rate.toFixed(0)}%` : '-',
+            agg.total > 0 ? agg.total : '-',
             providers || '-',
           ];
 
@@ -1434,7 +1578,6 @@ export class ExcelGenerator {
             };
           });
 
-          // Conditional formatting for approval %
           const approvalCell = addedRow.getCell(3);
           if (
             typeof approvalCell.value === 'string' &&
@@ -1484,16 +1627,138 @@ export class ExcelGenerator {
     workbook: ExcelJS.Workbook,
     filename: string,
   ): Promise<string> {
-    const outputDir = path.join(process.cwd(), 'Exceldata');
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-
+    const outputDir = this.ensureOutputDir();
     const filePath = path.join(outputDir, `${filename}.xlsx`);
+
     await workbook.xlsx.writeFile(filePath);
 
     console.log(`✅ Excel report created: ${filePath}`);
     return filePath;
+  }
+
+  private ensureOutputDir(): string {
+    const outputDir = path.join(process.cwd(), 'Exceldata');
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+    return outputDir;
+  }
+
+  private makeUniqueSheetName(name: string, used: Set<string>): string {
+    const base = (name || 'Sheet').substring(0, 31);
+
+    if (!used.has(base)) {
+      used.add(base);
+      return base;
+    }
+
+    for (let i = 1; i <= 999; i++) {
+      const suffix = `_${i}`;
+      const trimmed = base.substring(0, 31 - suffix.length);
+      const candidate = `${trimmed}${suffix}`;
+      if (!used.has(candidate)) {
+        used.add(candidate);
+        return candidate;
+      }
+    }
+
+    const fallback = `Sheet_${Date.now()}`.substring(0, 31);
+    used.add(fallback);
+    return fallback;
+  }
+
+  private buildCommissionLookup(reportResume: ReportResumePathSchemaType) {
+    const lookup = new Map<
+      string,
+      Map<string, Map<string, Map<string, string>>>
+    >();
+
+    for (const merchant of reportResume ?? []) {
+      const merchantKey = (merchant as any).merchantName ?? 'Unknown';
+
+      let byCountry = lookup.get(merchantKey);
+      if (!byCountry) {
+        byCountry = new Map();
+        lookup.set(merchantKey, byCountry);
+      }
+
+      for (const country of (merchant as any).countries ?? []) {
+        const countryKey = ((country as any).countryName ?? 'UNKNOWN')
+          .toUpperCase()
+          .trim();
+
+        let byProvider = byCountry.get(countryKey);
+        if (!byProvider) {
+          byProvider = new Map();
+          byCountry.set(countryKey, byProvider);
+        }
+
+        for (const provider of (country as any).providers ?? []) {
+          const providerKey = (provider as any).providerName ?? 'Unknown';
+
+          let byMethod = byProvider.get(providerKey);
+          if (!byMethod) {
+            byMethod = new Map();
+            byProvider.set(providerKey, byMethod);
+          }
+
+          for (const method of (provider as any).methods ?? []) {
+            const methodKey = (method as any).methodName ?? 'Unknown';
+            const formula = (method as any).commissionFormula ?? '0';
+            byMethod.set(methodKey, formula);
+          }
+        }
+      }
+    }
+
+    return lookup;
+  }
+
+  private getCommissionFormulaFromLookup(
+    lookup: Map<string, Map<string, Map<string, Map<string, string>>>>,
+    tx: z.infer<typeof ReportTransactionSchema>,
+  ): string | undefined {
+    const merchantKey = tx.merchantName ?? 'Unknown';
+    const countryKey = (tx.country ?? 'UNKNOWN').toUpperCase();
+    const providerKey = tx.provider ?? 'Unknown';
+    const methodKey = tx.payMethod ?? 'Unknown';
+
+    return lookup
+      .get(merchantKey)
+      ?.get(countryKey)
+      ?.get(providerKey)
+      ?.get(methodKey);
+  }
+
+  private getCommissionFn(formula: string): (amount: number) => number {
+    const cached = this.commissionFnCache.get(formula);
+    if (cached) return cached;
+
+    let fn: (amount: number) => number;
+
+    if (formula.includes('amount')) {
+      // eslint-disable-next-line no-new-func
+      fn = new Function(
+        'amount',
+        `"use strict"; return (${formula});`,
+      ) as any;
+    } else {
+      const fixed = Number(formula) || 0;
+      fn = () => fixed;
+    }
+
+    this.commissionFnCache.set(formula, fn);
+    return fn;
+  }
+
+  private evaluateCommissionCached(formula: string, amount: number): number {
+    try {
+      const fn = this.getCommissionFn(formula);
+      const v = Number(fn(amount));
+      return Number.isFinite(v) ? v : 0;
+    } catch {
+      return 0;
+    }
   }
 
   private computeDateRanges(
@@ -1504,10 +1769,11 @@ export class ExcelGenerator {
     const timestamps = transactions.map((t) =>
       new Date(t.dateRequest).getTime(),
     );
+
     const minDate = new Date(Math.min(...timestamps));
     const maxDate = new Date(Math.max(...timestamps));
 
-    const ranges: { label: string; start: Date; end: Date }[] = [];
+    const ranges: DateRange[] = [];
 
     const start = new Date(
       minDate.getFullYear(),
@@ -1516,9 +1782,10 @@ export class ExcelGenerator {
     );
 
     let rangeStart = new Date(start);
+
     while (rangeStart <= maxDate) {
       const rangeEnd = new Date(rangeStart);
-      rangeEnd.setDate(rangeStart.getDate() + 6); // 7-day window
+      rangeEnd.setDate(rangeStart.getDate() + 6);
 
       const label = `${rangeStart.getDate()}–${rangeEnd.getDate()} ${rangeStart.toLocaleString(
         'en-US',

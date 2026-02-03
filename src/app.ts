@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { jwt } from 'hono/jwt'
 
 import reportRoutes from './routes/report.routes'
 import providerRoutes from './routes/provider.routes'
@@ -24,7 +23,7 @@ app.use('*', logger({
   logRequestBody: false,
   logResponseBody: false,
   maxBodySize: 5000,
-  logHeaders: true,
+  logHeaders: false,
   skip: ['/health', '/metrics'],
 }))
 
@@ -34,7 +33,6 @@ app.route('/health', healthRoutes)
 const sessionSecret = process.env.SESSION_SECRET
 if (!sessionSecret) throw new Error('SESSION_SECRET is not set in .env')
 
-app.use('/api/*', jwt({ secret: sessionSecret }))
 
 app.route('/api/reports', reportRoutes)
 app.route('/api/providers', providerRoutes)
