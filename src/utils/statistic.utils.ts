@@ -19,7 +19,7 @@ export interface BaseTransaction {
   url_ERROR: string;
   dateRequest: Date;
   code: number;
-  status: 'pending' | 'ok' | 'error';
+  status: "pending" | "ok" | "error";
 }
 
 export interface StatsFilterSchemaType {
@@ -81,540 +81,561 @@ export interface RevenueEntry {
   revenue: number;
 }
 
-// Currency Exchange Rate Detection - South American Focus
+// ---------- Currency rates (heuristic, same idea as your original) ----------
 interface CurrencyRates {
   [currency: string]: number;
 }
 
+const KNOWN_RATES: CurrencyRates = {
+  USD: 1.0,
+
+  // South American Currencies (approximate to USD)
+  ARS: 0.001,
+  BOB: 0.145,
+  BRL: 0.2,
+  CLP: 0.001,
+  COP: 0.00025,
+  PEN: 0.27,
+  PYG: 0.00013,
+  UYU: 0.025,
+  VES: 0.027,
+  GYD: 0.0048,
+  SRD: 0.028,
+
+  // Common additional currencies
+  EUR: 1.1,
+  GBP: 1.27,
+  CAD: 0.74,
+  MXN: 0.05,
+};
+
+function normalizeCurrency(currency: string): string {
+  return String(currency || "").toUpperCase();
+}
+
 function detectExchangeRates(transactions: BaseTransaction[]): CurrencyRates {
-  // Fixed rates for South American currencies (approximate rates to USD as of Dec 2024)
-  const knownRates: CurrencyRates = {
-    'USD': 1.0,
-    // South American Currencies
-    'ARS': 0.001,    // Argentine Peso (~1000 ARS = 1 USD)
-    'BOB': 0.145,    // Bolivian Boliviano (~6.9 BOB = 1 USD)
-    'BRL': 0.20,     // Brazilian Real (~5 BRL = 1 USD)
-    'CLP': 0.001,    // Chilean Peso (~950 CLP = 1 USD)
-    'COP': 0.00025,  // Colombian Peso (~4000 COP = 1 USD)
-    'PEN': 0.27,     // Peruvian Sol (~3.7 PEN = 1 USD)
-    'PYG': 0.00013,  // Paraguayan Guarani (~7500 PYG = 1 USD)
-    'UYU': 0.025,    // Uruguayan Peso (~40 UYU = 1 USD)
-    'VES': 0.027,    // Venezuelan Bolívar (~36 VES = 1 USD)
-    'GYD': 0.0048,   // Guyanese Dollar (~210 GYD = 1 USD)
-    'SRD': 0.028,    // Surinamese Dollar (~36 SRD = 1 USD)
-    // Common additional currencies
-    'EUR': 1.10,     // Euro
-    'GBP': 1.27,     // British Pound
-    'CAD': 0.74,     // Canadian Dollar
-    'MXN': 0.050,    // Mexican Peso (~20 MXN = 1 USD)
-  };
+  const rates: CurrencyRates = { ...KNOWN_RATES };
 
-  const rates: CurrencyRates = { ...knownRates };
-  const unknownCurrencies = new Set<string>();
+  // Collect amounts for unknown currencies in a single pass
+  const amountsByCurrency = new Map<string, number[]>();
 
-  // Identify unknown currencies
   for (let i = 0; i < transactions.length; i++) {
-    const currency = transactions[i].currency;
-    if (!rates[currency]) {
-      unknownCurrencies.add(currency);
-    }
+    const tx = transactions[i];
+    const cur = normalizeCurrency(tx.currency);
+
+    if (rates[cur] !== undefined) continue;
+    if (tx.status !== "ok") continue;
+
+    const amount = Number(tx.quantity);
+    if (!Number.isFinite(amount)) continue;
+
+    const arr = amountsByCurrency.get(cur);
+    if (arr) arr.push(amount);
+    else amountsByCurrency.set(cur, [amount]);
   }
 
-  // For unknown currencies, use heuristic detection
-  for (const currency of unknownCurrencies) {
-    const amounts: number[] = [];
+  // Heuristic per unknown currency (median-based)
+  for (const [cur, amounts] of amountsByCurrency) {
+    amounts.sort((a, b) => a - b);
 
-    for (let i = 0; i < transactions.length; i++) {
-      const tx = transactions[i];
-      if (tx.currency === currency && tx.status === 'ok') {
-        amounts.push(parseFloat(tx.quantity));
-      }
-    }
+    const mid = Math.floor(amounts.length / 2);
+    const median =
+      amounts.length % 2 === 0
+        ? (amounts[mid - 1] + amounts[mid]) / 2
+        : amounts[mid];
 
-    if (amounts.length > 0) {
-      // Calculate median
-      amounts.sort((a, b) => a - b);
-      const median = amounts.length % 2 === 0
-        ? (amounts[amounts.length / 2 - 1] + amounts[amounts.length / 2]) / 2
-        : amounts[Math.floor(amounts.length / 2)];
+    let guess = 1.0;
+    if (median > 5000) guess = 0.0002;
+    else if (median > 1000) guess = 0.001;
+    else if (median > 500) guess = 0.002;
+    else if (median > 100) guess = 0.01;
+    else if (median > 20) guess = 0.05;
+    else if (median > 5) guess = 0.2;
 
-      // Estimate rate based on median transaction value
-      if (median > 5000) {
-        rates[currency] = 0.0002;  // Very high value currencies (like COP, PYG)
-      } else if (median > 1000) {
-        rates[currency] = 0.001;   // High value currencies (like ARS, CLP)
-      } else if (median > 500) {
-        rates[currency] = 0.002;   // Medium-high value
-      } else if (median > 100) {
-        rates[currency] = 0.01;    // Medium value
-      } else if (median > 20) {
-        rates[currency] = 0.05;    // Lower-medium value (like MXN, UYU)
-      } else if (median > 5) {
-        rates[currency] = 0.20;    // Lower value (like BRL, PEN)
-      } else {
-        rates[currency] = 1.0;     // Close to USD (like EUR, GBP)
-      }
-    }
+    rates[cur] = guess;
   }
 
   return rates;
 }
 
-function convertToUSD(amount: number, currency: string, rates: CurrencyRates): number {
-  if (currency === 'USD') return amount;
-  const rate = rates[currency] || 1;
+function convertToUSD(
+  amount: number,
+  currency: string,
+  rates: CurrencyRates,
+): number {
+  const cur = normalizeCurrency(currency);
+  const rate = rates[cur] ?? 1;
   return amount * rate;
 }
 
-// Helper function to determine if transaction should be subtracted
-function isPayoutTransaction(payMethod: string): boolean {
-  const payoutMethods = ['payout', 'withdrawal', 'refund', 'disbursement'];
-  return payoutMethods.some(method =>
-    payMethod.toLowerCase().includes(method)
-  );
+// ---------- Date helpers (faster than toISOString().slice(0, 10)) ----------
+type TimezoneMode = "utc" | "local";
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
 }
 
-// Helper function to get transaction multiplier
-function getTransactionMultiplier(tx: BaseTransaction): number {
-  // Only process successful transactions
-  if (tx.status !== 'ok') return 0;
-
-  // Payout transactions are negative (subtract from revenue)
-  return isPayoutTransaction(tx.payMethod) ? -1 : 1;
+function formatDateKey(d: Date, tz: TimezoneMode): string {
+  const y = tz === "utc" ? d.getUTCFullYear() : d.getFullYear();
+  const m = tz === "utc" ? d.getUTCMonth() + 1 : d.getMonth() + 1;
+  const day = tz === "utc" ? d.getUTCDate() : d.getDate();
+  return `${y}-${pad2(m)}-${pad2(day)}`;
 }
 
-// UPDATED: Calculate Total Revenue with Payout Support
-export function calculateTotalRevenue(transactions: BaseTransaction[]): number {
-  const rates = detectExchangeRates(transactions);
-  let total = 0;
+function formatMonthKey(d: Date, tz: TimezoneMode): string {
+  const y = tz === "utc" ? d.getUTCFullYear() : d.getFullYear();
+  const m = tz === "utc" ? d.getUTCMonth() + 1 : d.getMonth() + 1;
+  return `${y}-${pad2(m)}`;
+}
 
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
-    const multiplier = getTransactionMultiplier(tx);
-
-    if (multiplier !== 0) {
-      const amount = parseFloat(tx.quantity);
-      const usdAmount = convertToUSD(amount, tx.currency, rates);
-      total += usdAmount * multiplier;
-    }
+function getMonthStartMs(now: number, tz: TimezoneMode): number {
+  const d = new Date(now);
+  if (tz === "utc") {
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
   }
-  return total;
+  return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
 }
 
-// UPDATED: Calculate AOV with Payout Support
-export function calculateAOV(transactions: BaseTransaction[]): number {
-  const rates = detectExchangeRates(transactions);
-  let total = 0;
-  let count = 0;
-
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
-    const multiplier = getTransactionMultiplier(tx);
-
-    if (multiplier !== 0) {
-      const amount = parseFloat(tx.quantity);
-      const usdAmount = convertToUSD(amount, tx.currency, rates);
-      total += usdAmount * multiplier;
-      count++;
-    }
+function getMonthStartMsOffset(
+  now: number,
+  monthOffset: number,
+  tz: TimezoneMode,
+): number {
+  const d = new Date(now);
+  if (tz === "utc") {
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + monthOffset, 1);
   }
-
-  return count === 0 ? 0 : total / count;
+  return new Date(d.getFullYear(), d.getMonth() + monthOffset, 1).getTime();
 }
 
-export function calculateSuccessRate(transactions: BaseTransaction[]): number {
-  if (transactions.length === 0) return 0;
+// Rolling 7-day windows (matches your original logic):
+// index 0 => last 7 days (inclusive endpoints by ms), index 1 => previous 7 days, ...
+const DAY_MS = 86_400_000;
+const WEEK_MS = 7 * DAY_MS;
 
-  let successCount = 0;
-  for (let i = 0; i < transactions.length; i++) {
-    if (transactions[i].status === 'ok') {
-      successCount++;
-    }
-  }
+function rollingWeekIndex(now: number, txTime: number): number {
+  const age = now - txTime;
+  if (age < 0) return -1;
 
-  return (successCount / transactions.length) * 100;
+  const idx = Math.floor(age / WEEK_MS);
+  if (idx < 0 || idx > 4) return -1;
+
+  // Enforce the same "6 days back from weekEnd" window:
+  // remainder <= 6 days means within that 7-day inclusive range.
+  const rem = age - idx * WEEK_MS;
+  if (rem > 6 * DAY_MS) return -1;
+
+  return idx;
 }
 
-// UPDATED: Calculate Revenue Change with Payout Support
-export function calculateRevenueChangeValue(transactions: BaseTransaction[]): number {
+// ---------- Core analyzer (single pass, payout is NOT subtracted) ----------
+const DEFAULT_COLORS = [
+  "#3b82f6",
+  "#10b981",
+  "#f59e0b",
+  "#ef4444",
+  "#8b5cf6",
+  "#ec4899",
+  "#06b6d4",
+  "#84cc16",
+];
+
+export interface TransactionAnalytics {
+  rates: CurrencyRates;
+
+  totalRevenue: number;
+  aov: number;
+  successRate: number;
+  revenueChangeValue: number;
+
+  monthlyRevenue: MonthlyRevenue[];
+  dailySummary: DailyTransactionSummary[];
+  countrySummary: CountryTransactionSummary[];
+
+  countryRevenue: RevenueCountry[];
+  revenueChartData: RevenueEntry[];
+  chartConfig: ChartConfig;
+
+  statusBreakdown: ChartDataItem[];
+
+  last5WeeksCount: ChartDataWeekly[];
+  last5WeeksAov: ChartDataWeekly[];
+  last5WeeksSuccessRate: ChartDataWeekly[];
+
+  lastWeekIncrease: (metric: "count" | "aov" | "successRate") => number;
+}
+
+export function analyzeTransactions(
+  transactions: BaseTransaction[],
+  options?: {
+    now?: number;
+    timezone?: TimezoneMode;
+    colors?: string[];
+  },
+): TransactionAnalytics {
+  const now = options?.now ?? Date.now();
+  const tz: TimezoneMode = options?.timezone ?? "utc";
+  const colors = options?.colors ?? DEFAULT_COLORS;
+
   const rates = detectExchangeRates(transactions);
-  const now = Date.now();
-  const currentDate = new Date(now);
-  const currentMonthStart = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1).getTime();
-  const lastMonthStart = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1).getTime();
 
-  let currentRevenue = 0;
-  let lastRevenue = 0;
+  const totalCount = transactions.length;
 
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
-    const multiplier = getTransactionMultiplier(tx);
+  // Overall status counts
+  let okStatusCount = 0;
+  let pendingStatusCount = 0;
+  let errorStatusCount = 0;
 
-    if (multiplier !== 0) {
-      const txTime = new Date(tx.dateRequest).getTime();
-      const amount = parseFloat(tx.quantity);
-      const usdAmount = convertToUSD(amount, tx.currency, rates) * multiplier;
+  // Revenue stats (ONLY status === "ok")
+  let totalRevenue = 0;
+  let okRevenueCount = 0;
 
-      if (txTime >= currentMonthStart) {
-        currentRevenue += usdAmount;
-      } else if (txTime >= lastMonthStart && txTime < currentMonthStart) {
-        lastRevenue += usdAmount;
-      }
-    }
-  }
+  // Revenue change (current month vs last month)
+  const currentMonthStart = getMonthStartMs(now, tz);
+  const lastMonthStart = getMonthStartMsOffset(now, -1, tz);
+  let currentMonthRevenue = 0;
+  let lastMonthRevenue = 0;
 
-  if (lastRevenue === 0) return currentRevenue > 0 ? 100 : 0;
-  return ((currentRevenue - lastRevenue) / lastRevenue) * 100;
-}
-
-// UPDATED: Aggregate Revenue by Month with Payout Support
-export function aggregateRevenueByMonth(transactions: BaseTransaction[]): MonthlyRevenue[] {
-  const rates = detectExchangeRates(transactions);
+  // Aggregations
   const monthlyMap = new Map<string, number>();
+  const dailyMap = new Map<
+    string,
+    { success: number; pending: number; fail: number }
+  >();
+  const countryCountMap = new Map<string, number>();
+
+  const countryRevenueMap = new Map<
+    string,
+    { totalRevenue: number; lastWeekRevenue: number; previousWeekRevenue: number }
+  >();
+
+  // Revenue chart (country x day)
+  const countryDateRevenue = new Map<string, number>();
+
+  // Stable country order for colors/config
+  const countriesOrdered: string[] = [];
+  const countrySeen = new Set<string>();
+
+  // Week buckets (index 0 = most recent 7-day window)
+  const week = Array.from({ length: 5 }, () => ({
+    allCount: 0,
+    okCount: 0,
+    okRevenue: 0,
+  }));
 
   for (let i = 0; i < transactions.length; i++) {
     const tx = transactions[i];
-    const multiplier = getTransactionMultiplier(tx);
 
-    if (multiplier !== 0) {
-      const date = new Date(tx.dateRequest);
-      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      const amount = parseFloat(tx.quantity);
-      const usdAmount = convertToUSD(amount, tx.currency, rates) * multiplier;
-      monthlyMap.set(monthKey, (monthlyMap.get(monthKey) || 0) + usdAmount);
+    // Track countries for charts/config
+    if (!countrySeen.has(tx.country)) {
+      countrySeen.add(tx.country);
+      countriesOrdered.push(tx.country);
     }
-  }
 
-  return Array.from(monthlyMap, ([month, revenue]) => ({ month, revenue }))
-    .sort((a, b) => a.month.localeCompare(b.month));
-}
+    // Country transaction counts (all statuses)
+    countryCountMap.set(tx.country, (countryCountMap.get(tx.country) ?? 0) + 1);
 
-// Updated to match DailyTransactionSummary type
-export function aggregateTransactionsByDay(transactions: BaseTransaction[]): DailyTransactionSummary[] {
-  const dailyMap = new Map<string, { success: number; pending: number; fail: number }>();
+    // Daily summary (all statuses)
+    const txTime = new Date(tx.dateRequest).getTime();
+    const d = new Date(txTime);
+    const dateKey = formatDateKey(d, tz);
 
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
-    const dateKey = new Date(tx.dateRequest).toISOString().slice(0, 10);
-    const existing = dailyMap.get(dateKey);
+    const day = dailyMap.get(dateKey) ?? {
+      success: 0,
+      pending: 0,
+      fail: 0,
+    };
 
-    if (existing) {
-      if (tx.status === 'ok') existing.success++;
-      else if (tx.status === 'pending') existing.pending++;
-      else if (tx.status === 'error') existing.fail++;
-    } else {
-      dailyMap.set(dateKey, {
-        success: tx.status === 'ok' ? 1 : 0,
-        pending: tx.status === 'pending' ? 1 : 0,
-        fail: tx.status === 'error' ? 1 : 0
-      });
+    if (tx.status === "ok") day.success++;
+    else if (tx.status === "pending") day.pending++;
+    else day.fail++;
+
+    dailyMap.set(dateKey, day);
+
+    // Overall status counters (all statuses)
+    if (tx.status === "ok") okStatusCount++;
+    else if (tx.status === "pending") pendingStatusCount++;
+    else errorStatusCount++;
+
+    // Weekly buckets (all statuses for count; ok-only for revenue/AOV)
+    const wIdx = rollingWeekIndex(now, txTime);
+    if (wIdx !== -1) {
+      week[wIdx].allCount++;
     }
-  }
 
-  return Array.from(dailyMap, ([date, data]) => ({ date, ...data }))
-    .sort((a, b) => a.date.localeCompare(b.date));
-}
+    // Revenue-related processing (ONLY successful tx)
+    if (tx.status !== "ok") continue;
 
-// Updated to match CountryTransactionSummary type
-export function groupTransactionsByCountry(transactions: BaseTransaction[]): CountryTransactionSummary[] {
-  const countryMap = new Map<string, number>();
-  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+    const amount = Number(tx.quantity);
+    if (!Number.isFinite(amount)) continue;
 
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
-    countryMap.set(tx.country, (countryMap.get(tx.country) || 0) + 1);
-  }
+    // IMPORTANT CHANGE: payouts are NOT subtracted anymore; everything sums.
+    const usd = convertToUSD(amount, tx.currency, rates);
 
-  let idx = 0;
-  return Array.from(countryMap, ([country, transactions]) => ({
-    country,
-    transactions,
-    fill: colors[idx++ % colors.length]
-  })).sort((a, b) => b.transactions - a.transactions);
-}
+    totalRevenue += usd;
+    okRevenueCount++;
 
-// UPDATED: Compute Country Revenue with Payout Support
-export function computeCountryRevenue(transactions: BaseTransaction[]): RevenueCountry[] {
-  const rates = detectExchangeRates(transactions);
-  const now = Date.now();
-  const DAY_MS = 86400000;
-  const lastWeekStart = now - (6 * DAY_MS);
-  const previousWeekStart = now - (13 * DAY_MS);
-  const previousWeekEnd = now - (7 * DAY_MS);
-
-  const countryMap = new Map<string, {
-    totalRevenue: number;
-    lastWeekRevenue: number;
-    previousWeekRevenue: number;
-  }>();
-
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
-    const multiplier = getTransactionMultiplier(tx);
-
-    if (multiplier !== 0) {
-      const amount = parseFloat(tx.quantity);
-      const usdAmount = convertToUSD(amount, tx.currency, rates) * multiplier;
-      const txTime = new Date(tx.dateRequest).getTime();
-      const existing = countryMap.get(tx.country);
-
-      if (existing) {
-        existing.totalRevenue += usdAmount;
-        if (txTime >= lastWeekStart && txTime <= now) {
-          existing.lastWeekRevenue += usdAmount;
-        } else if (txTime >= previousWeekStart && txTime <= previousWeekEnd) {
-          existing.previousWeekRevenue += usdAmount;
-        }
-      } else {
-        countryMap.set(tx.country, {
-          totalRevenue: usdAmount,
-          lastWeekRevenue: (txTime >= lastWeekStart && txTime <= now) ? usdAmount : 0,
-          previousWeekRevenue: (txTime >= previousWeekStart && txTime <= previousWeekEnd) ? usdAmount : 0
-        });
-      }
+    if (txTime >= currentMonthStart) currentMonthRevenue += usd;
+    else if (txTime >= lastMonthStart && txTime < currentMonthStart) {
+      lastMonthRevenue += usd;
     }
+
+    // Monthly revenue
+    const monthKey = formatMonthKey(d, tz);
+    monthlyMap.set(monthKey, (monthlyMap.get(monthKey) ?? 0) + usd);
+
+    // Weekly revenue/AOV bucket
+    if (wIdx !== -1) {
+      week[wIdx].okCount++;
+      week[wIdx].okRevenue += usd;
+    }
+
+    // Country revenue totals + week-over-week (last week vs previous week)
+    const lastWeekStart = now - 6 * DAY_MS;
+    const previousWeekStart = now - 13 * DAY_MS;
+    const previousWeekEnd = now - 7 * DAY_MS;
+
+    const c = countryRevenueMap.get(tx.country) ?? {
+      totalRevenue: 0,
+      lastWeekRevenue: 0,
+      previousWeekRevenue: 0,
+    };
+
+    c.totalRevenue += usd;
+    if (txTime >= lastWeekStart && txTime <= now) c.lastWeekRevenue += usd;
+    else if (txTime >= previousWeekStart && txTime <= previousWeekEnd) {
+      c.previousWeekRevenue += usd;
+    }
+
+    countryRevenueMap.set(tx.country, c);
+
+    // Revenue chart (country x date)
+    const key = `${tx.country}|||${dateKey}`;
+    countryDateRevenue.set(key, (countryDateRevenue.get(key) ?? 0) + usd);
   }
 
-  return Array.from(countryMap, ([country, data]) => {
-    const lastWeekIncrease = data.previousWeekRevenue === 0
-      ? (data.lastWeekRevenue > 0 ? 100 : 0)
-      : ((data.lastWeekRevenue - data.previousWeekRevenue) / data.previousWeekRevenue) * 100;
+  const aov = okRevenueCount === 0 ? 0 : totalRevenue / okRevenueCount;
+  const successRate = totalCount === 0 ? 0 : (okStatusCount / totalCount) * 100;
+
+  const revenueChangeValue =
+    lastMonthRevenue === 0
+      ? currentMonthRevenue > 0
+        ? 100
+        : 0
+      : ((currentMonthRevenue - lastMonthRevenue) / lastMonthRevenue) * 100;
+
+  const monthlyRevenue = Array.from(monthlyMap, ([month, revenue]) => ({
+    month,
+    revenue,
+  })).sort((a, b) => a.month.localeCompare(b.month));
+
+  const dailySummary = Array.from(dailyMap, ([date, data]) => ({
+    date,
+    ...data,
+  })).sort((a, b) => a.date.localeCompare(b.date));
+
+  let colorIdx = 0;
+  const countrySummary = Array.from(
+    countryCountMap,
+    ([country, transactionsCount]) => ({
+      country,
+      transactions: transactionsCount,
+      fill: colors[colorIdx++ % colors.length],
+    }),
+  ).sort((a, b) => b.transactions - a.transactions);
+
+  const countryRevenue = Array.from(countryRevenueMap, ([country, data]) => {
+    const lastWeekIncrease =
+      data.previousWeekRevenue === 0
+        ? data.lastWeekRevenue > 0
+          ? 100
+          : 0
+        : ((data.lastWeekRevenue - data.previousWeekRevenue) /
+          data.previousWeekRevenue) *
+        100;
 
     return {
       country,
       totalRevenue: data.totalRevenue,
-      lastWeekIncrease
+      lastWeekIncrease,
     };
   }).sort((a, b) => b.totalRevenue - a.totalRevenue);
-}
 
-// UPDATED: Generate Revenue Chart Data with Payout Support
-export function generateRevenueChartData(transactions: BaseTransaction[]): RevenueEntry[] {
-  const rates = detectExchangeRates(transactions);
-  const countryDailyMap = new Map<string, Map<string, number>>();
-
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
-    const multiplier = getTransactionMultiplier(tx);
-
-    if (multiplier !== 0) {
-      const dateKey = new Date(tx.dateRequest).toISOString().slice(0, 10);
-      const amount = parseFloat(tx.quantity);
-      const usdAmount = convertToUSD(amount, tx.currency, rates) * multiplier;
-
-      if (!countryDailyMap.has(tx.country)) {
-        countryDailyMap.set(tx.country, new Map());
-      }
-
-      const countryMap = countryDailyMap.get(tx.country)!;
-      countryMap.set(dateKey, (countryMap.get(dateKey) || 0) + usdAmount);
-    }
+  const revenueChartData: RevenueEntry[] = [];
+  for (const [key, revenue] of countryDateRevenue) {
+    const [country, date] = key.split("|||");
+    revenueChartData.push({ date, name: country, revenue });
   }
+  revenueChartData.sort((a, b) => a.date.localeCompare(b.date));
 
-  const result: RevenueEntry[] = [];
-  for (const [country, dateMap] of countryDailyMap) {
-    for (const [date, revenue] of dateMap) {
-      result.push({ date, name: country, revenue });
-    }
-  }
-
-  return result.sort((a, b) => a.date.localeCompare(b.date));
-}
-
-// Optimized Chart Config
-export function generateChartConfig(transactions: BaseTransaction[]): ChartConfig {
-  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
-  const countries = new Set<string>();
-
-  for (let i = 0; i < transactions.length; i++) {
-    countries.add(transactions[i].country);
-  }
-
-  const config: ChartConfig = {};
-  let idx = 0;
-  for (const country of countries) {
-    config[country] = {
+  const chartConfig: ChartConfig = {};
+  for (let i = 0; i < countriesOrdered.length; i++) {
+    const country = countriesOrdered[i];
+    chartConfig[country] = {
       label: country,
-      color: colors[idx % colors.length]
+      color: colors[i % colors.length],
     };
-    idx++;
   }
 
-  return config;
-}
-
-// Updated to match ChartDataItem type
-export function processTransactionData(transactions: BaseTransaction[]): ChartDataItem[] {
-  if (transactions.length === 0) return [];
-
-  const counts = { ok: 0, pending: 0, error: 0 };
-
-  for (let i = 0; i < transactions.length; i++) {
-    counts[transactions[i].status]++;
-  }
-
-  const statusConfig = [
-    { key: 'ok', label: 'Success', color: '#10b981' },
-    { key: 'pending', label: 'Pending', color: '#f59e0b' },
-    { key: 'error', label: 'Failed', color: '#ef4444' }
+  const statusBreakdown: ChartDataItem[] = [
+    { status: "Success", count: okStatusCount, fill: "#10b981" },
+    { status: "Pending", count: pendingStatusCount, fill: "#f59e0b" },
+    { status: "Failed", count: errorStatusCount, fill: "#ef4444" },
   ];
 
-  return statusConfig.map(({ key, label, color }) => ({
-    status: label,
-    count: counts[key as keyof typeof counts],
-    fill: color
-  }));
-}
+  // Output in the same visual order as your original: Week 1 (oldest) -> Week 5
+  const last5WeeksCount: ChartDataWeekly[] = [];
+  const last5WeeksAov: ChartDataWeekly[] = [];
+  const last5WeeksSuccessRate: ChartDataWeekly[] = [];
 
-// Updated to match ChartDataWeekly type (amount instead of count)
-export function getLast5WeeksChartData(transactions: BaseTransaction[]): ChartDataWeekly[] {
-  const now = Date.now();
-  const DAY_MS = 86400000;
-  const weeks: ChartDataWeekly[] = [];
+  for (let idx = 4; idx >= 0; idx--) {
+    const label = `Week ${5 - idx}`;
+    const b = week[idx];
 
-  for (let i = 4; i >= 0; i--) {
-    const weekEnd = now - (i * 7 * DAY_MS);
-    const weekStart = weekEnd - (6 * DAY_MS);
-    let amount = 0;
+    last5WeeksCount.push({ week: label, amount: b.allCount });
 
-    for (let j = 0; j < transactions.length; j++) {
-      const txTime = new Date(transactions[j].dateRequest).getTime();
-      if (txTime >= weekStart && txTime <= weekEnd) {
-        amount++;
-      }
-    }
+    last5WeeksAov.push({
+      week: label,
+      amount: b.okCount > 0 ? b.okRevenue / b.okCount : 0,
+    });
 
-    weeks.push({
-      week: `Week ${5 - i}`,
-      amount
+    last5WeeksSuccessRate.push({
+      week: label,
+      amount: b.allCount > 0 ? (b.okCount / b.allCount) * 100 : 0,
     });
   }
 
-  return weeks;
-}
+  const lastWeekIncrease = (metric: "count" | "aov" | "successRate"): number => {
+    const last = week[0]; // most recent 7-day window
+    const prev = week[1]; // previous 7-day window
 
-// UPDATED: Last 5 Weeks AOV Chart Data with Payout Support
-export function getLast5WeeksAOVChartData(transactions: BaseTransaction[]): ChartDataWeekly[] {
-  const rates = detectExchangeRates(transactions);
-  const now = Date.now();
-  const DAY_MS = 86400000;
-  const weeks: ChartDataWeekly[] = [];
+    let lastValue = 0;
+    let prevValue = 0;
 
-  for (let i = 4; i >= 0; i--) {
-    const weekEnd = now - (i * 7 * DAY_MS);
-    const weekStart = weekEnd - (6 * DAY_MS);
-    let revenue = 0;
-    let successCount = 0;
-
-    for (let j = 0; j < transactions.length; j++) {
-      const tx = transactions[j];
-      const txTime = new Date(tx.dateRequest).getTime();
-      const multiplier = getTransactionMultiplier(tx);
-
-      if (txTime >= weekStart && txTime <= weekEnd && multiplier !== 0) {
-        const amount = parseFloat(tx.quantity);
-        const usdAmount = convertToUSD(amount, tx.currency, rates) * multiplier;
-        revenue += usdAmount;
-        successCount++;
-      }
+    if (metric === "count") {
+      lastValue = last.allCount;
+      prevValue = prev.allCount;
+    } else if (metric === "aov") {
+      lastValue = last.okCount > 0 ? last.okRevenue / last.okCount : 0;
+      prevValue = prev.okCount > 0 ? prev.okRevenue / prev.okCount : 0;
+    } else {
+      lastValue = last.allCount > 0 ? (last.okCount / last.allCount) * 100 : 0;
+      prevValue = prev.allCount > 0 ? (prev.okCount / prev.allCount) * 100 : 0;
     }
 
-    weeks.push({
-      week: `Week ${5 - i}`,
-      amount: successCount > 0 ? revenue / successCount : 0
-    });
-  }
+    if (prevValue === 0) return lastValue > 0 ? 100 : 0;
+    return ((lastValue - prevValue) / prevValue) * 100;
+  };
 
-  return weeks;
+  return {
+    rates,
+
+    totalRevenue,
+    aov,
+    successRate,
+    revenueChangeValue,
+
+    monthlyRevenue,
+    dailySummary,
+    countrySummary,
+
+    countryRevenue,
+    revenueChartData,
+    chartConfig,
+
+    statusBreakdown,
+
+    last5WeeksCount,
+    last5WeeksAov,
+    last5WeeksSuccessRate,
+
+    lastWeekIncrease,
+  };
 }
 
-export function getLast5WeeksSuccessRateChartData(transactions: BaseTransaction[]): ChartDataWeekly[] {
-  const now = Date.now();
-  const DAY_MS = 86400000;
-  const weeks: ChartDataWeekly[] = [];
+// ---------- Backward-compatible wrappers (optional) ----------
+// If your UI calls many of these, prefer calling analyzeTransactions() once and
+// reusing the returned object.
 
-  for (let i = 4; i >= 0; i--) {
-    const weekEnd = now - (i * 7 * DAY_MS);
-    const weekStart = weekEnd - (6 * DAY_MS);
-    let count = 0;
-    let successCount = 0;
-
-    for (let j = 0; j < transactions.length; j++) {
-      const tx = transactions[j];
-      const txTime = new Date(tx.dateRequest).getTime();
-
-      if (txTime >= weekStart && txTime <= weekEnd) {
-        count++;
-        if (tx.status === 'ok') {
-          successCount++;
-        }
-      }
-    }
-
-    weeks.push({
-      week: `Week ${5 - i}`,
-      amount: count > 0 ? (successCount / count) * 100 : 0
-    });
-  }
-
-  return weeks;
+export function calculateTotalRevenue(transactions: BaseTransaction[]): number {
+  return analyzeTransactions(transactions).totalRevenue;
 }
 
-// UPDATED: Calculate Last Week Increase with Payout Support
+export function calculateAOV(transactions: BaseTransaction[]): number {
+  return analyzeTransactions(transactions).aov;
+}
+
+export function calculateSuccessRate(transactions: BaseTransaction[]): number {
+  return analyzeTransactions(transactions).successRate;
+}
+
+export function calculateRevenueChangeValue(
+  transactions: BaseTransaction[],
+): number {
+  return analyzeTransactions(transactions).revenueChangeValue;
+}
+
+export function aggregateRevenueByMonth(
+  transactions: BaseTransaction[],
+): MonthlyRevenue[] {
+  return analyzeTransactions(transactions).monthlyRevenue;
+}
+
+export function aggregateTransactionsByDay(
+  transactions: BaseTransaction[],
+): DailyTransactionSummary[] {
+  return analyzeTransactions(transactions).dailySummary;
+}
+
+export function groupTransactionsByCountry(
+  transactions: BaseTransaction[],
+): CountryTransactionSummary[] {
+  return analyzeTransactions(transactions).countrySummary;
+}
+
+export function computeCountryRevenue(
+  transactions: BaseTransaction[],
+): RevenueCountry[] {
+  return analyzeTransactions(transactions).countryRevenue;
+}
+
+export function generateRevenueChartData(
+  transactions: BaseTransaction[],
+): RevenueEntry[] {
+  return analyzeTransactions(transactions).revenueChartData;
+}
+
+export function generateChartConfig(transactions: BaseTransaction[]): ChartConfig {
+  return analyzeTransactions(transactions).chartConfig;
+}
+
+export function processTransactionData(
+  transactions: BaseTransaction[],
+): ChartDataItem[] {
+  return analyzeTransactions(transactions).statusBreakdown;
+}
+
+export function getLast5WeeksChartData(
+  transactions: BaseTransaction[],
+): ChartDataWeekly[] {
+  return analyzeTransactions(transactions).last5WeeksCount;
+}
+
+export function getLast5WeeksAOVChartData(
+  transactions: BaseTransaction[],
+): ChartDataWeekly[] {
+  return analyzeTransactions(transactions).last5WeeksAov;
+}
+
+export function getLast5WeeksSuccessRateChartData(
+  transactions: BaseTransaction[],
+): ChartDataWeekly[] {
+  return analyzeTransactions(transactions).last5WeeksSuccessRate;
+}
+
 export function calculateLastWeekIncrease(
   transactions: BaseTransaction[],
-  metric: 'count' | 'aov' | 'successRate'
+  metric: "count" | "aov" | "successRate",
 ): number {
-  const rates = detectExchangeRates(transactions);
-  const now = Date.now();
-  const DAY_MS = 86400000;
-
-  const lastWeekStart = now - (6 * DAY_MS);
-  const previousWeekStart = now - (13 * DAY_MS);
-  const previousWeekEnd = now - (7 * DAY_MS);
-
-  const lastWeek = { count: 0, revenue: 0, successCount: 0 };
-  const prevWeek = { count: 0, revenue: 0, successCount: 0 };
-
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
-    const txTime = new Date(tx.dateRequest).getTime();
-    const multiplier = getTransactionMultiplier(tx);
-
-    if (multiplier !== 0) {
-      const amount = parseFloat(tx.quantity);
-      const usdAmount = convertToUSD(amount, tx.currency, rates) * multiplier;
-
-      if (txTime >= lastWeekStart && txTime <= now) {
-        lastWeek.count++;
-        lastWeek.revenue += usdAmount;
-        lastWeek.successCount++;
-      } else if (txTime >= previousWeekStart && txTime <= previousWeekEnd) {
-        prevWeek.count++;
-        prevWeek.revenue += usdAmount;
-        prevWeek.successCount++;
-      }
-    }
-  }
-
-  let lastValue = 0;
-  let previousValue = 0;
-
-  switch (metric) {
-    case 'count':
-      lastValue = lastWeek.count;
-      previousValue = prevWeek.count;
-      break;
-    case 'aov':
-      lastValue = lastWeek.successCount > 0 ? lastWeek.revenue / lastWeek.successCount : 0;
-      previousValue = prevWeek.successCount > 0 ? prevWeek.revenue / prevWeek.successCount : 0;
-      break;
-    case 'successRate':
-      lastValue = lastWeek.count > 0 ? (lastWeek.successCount / lastWeek.count) * 100 : 0;
-      previousValue = prevWeek.count > 0 ? (prevWeek.successCount / prevWeek.count) * 100 : 0;
-      break;
-  }
-
-  if (previousValue === 0) return lastValue > 0 ? 100 : 0;
-  return ((lastValue - previousValue) / previousValue) * 100;
+  return analyzeTransactions(transactions).lastWeekIncrease(metric);
 }
