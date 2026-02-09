@@ -116,6 +116,17 @@ export const countryOperation = pgTable("country_operation", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const user = pgTable("user", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  name: text("name"),
+  role: text("role", { enum: ["superadmin", "user"] }).notNull().default("user"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const transaction = pgTable("transaction", {
   id: uuid("id").primaryKey().defaultRandom(),
   merchantId: uuid("merchant_id")

@@ -10,7 +10,8 @@
   },
   "scripts": {
     "dev:api": "bun run src/index.ts",
-    "dev:worker": "bun run src/worker/report.worker.ts"
+    "dev:worker": "bun run src/worker/report.worker.ts",
+    "seed": "bun run src/db/seed.ts"
   },
   "peerDependencies": {
     "typescript": "^5.9.3"

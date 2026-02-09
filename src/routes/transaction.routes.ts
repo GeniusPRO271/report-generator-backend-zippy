@@ -4,6 +4,7 @@ import Container from "typedi";
 import { TransactionService } from "../services/transaction.service";
 import { InsertTransactionSchema, UpdateTransactionSchema } from "../db/zodSchema/transactions.schema";
 import { PaginationSchema } from "../types/zod/pagination";
+import { requireRole } from "../middleware/requireRole";
 
 const transactionRoutes = new Hono();
 const transactionService = Container.get(TransactionService);
@@ -40,7 +41,7 @@ transactionRoutes.get("/:id", async (c) => {
   return c.json(t);
 });
 
-transactionRoutes.post("/import", async (c) => {
+transactionRoutes.post("/import", requireRole("superadmin"), async (c) => {
   const data = await c.req.json();
   if (!Array.isArray(data)) {
     return c.json({ error: "Expected an array of transactions" }, 400);
