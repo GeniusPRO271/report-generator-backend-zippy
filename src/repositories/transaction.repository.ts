@@ -10,49 +10,13 @@ export class TransactionRepository {
 
 
   async create(data: InsertTransactionSchemaType) {
-    console.log("🔵 Repository.create called");
-    console.log("🔵 Input data:", JSON.stringify(data, null, 2));
+    const [result] = await db.insert(transaction).values(data).returning();
+    return result;
+  }
 
-    // Log each field type
-    console.log("🔵 Field types:");
-    Object.entries(data).forEach(([key, value]) => {
-      console.log(`  ${key}: ${typeof value} = ${value === null ? 'NULL' : value === undefined ? 'UNDEFINED' : JSON.stringify(value)}`);
-    });
-
-    try {
-      console.log("🔵 Executing insert query...");
-      const [result] = await db.insert(transaction).values(data).returning();
-      console.log("✅ Repository.create successful, id:", result.id);
-      return result;
-    } catch (error: any) {
-      console.error("❌ Repository.create FAILED");
-      console.error("❌ Error type:", error.constructor.name);
-      console.error("❌ Error name:", error.name);
-      console.error("❌ Error message:", error.message);
-
-      // Log all error properties
-      console.error("❌ All error properties:");
-      Object.keys(error).forEach(key => {
-        console.error(`  ${key}:`, error[key]);
-      });
-
-      // Try to get nested errors
-      if (error.cause) {
-        console.error("❌ Error.cause:", error.cause);
-      }
-      if (error.original) {
-        console.error("❌ Error.original:", error.original);
-      }
-
-      // Log stack trace
-      console.error("❌ Stack trace:", error.stack);
-
-      // If it's a Drizzle/Postgres error, try to extract more details
-      console.error("❌ Full error object:", JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
-
-      // Re-throw to let the service handle it
-      throw error;
-    }
+  async createMany(data: InsertTransactionSchemaType[]) {
+    if (data.length === 0) return [];
+    return await db.insert(transaction).values(data).returning();
   }
 
   async count() {
@@ -84,6 +48,14 @@ export class TransactionRepository {
     return rows[0] ?? null;
   }
 
+  async findByCommerceIds(commerceReqIds: string[]) {
+    if (commerceReqIds.length === 0) return [];
+    return await db
+      .select()
+      .from(transaction)
+      .where(inArray(transaction.commerceReqId, commerceReqIds));
+  }
+
   async findAll() {
     return await db.select().from(transaction);
   }
@@ -96,6 +68,25 @@ export class TransactionRepository {
         and(
           gte(transaction.dateRequest, from),
           lte(transaction.dateRequest, to)
+        )
+      );
+  }
+
+  async findWithDateRangeAndFilters(
+    from: Date,
+    to: Date,
+    merchantId: string,
+    countryId: string,
+  ) {
+    return await db
+      .select()
+      .from(transaction)
+      .where(
+        and(
+          gte(transaction.dateRequest, from),
+          lte(transaction.dateRequest, to),
+          eq(transaction.merchantId, merchantId),
+          eq(transaction.countryId, countryId),
         )
       );
   }
@@ -114,6 +105,69 @@ export class TransactionRepository {
     await db.delete(transaction).where(eq(transaction.id, id));
   }
 
+
+  async findForApprovalRates(
+    from: Date,
+    to: Date,
+    filters: {
+      merchantId?: string[];
+      providerId?: string[];
+      countryId?: string[];
+      payMethodId?: string[];
+    }
+  ) {
+    const clauses: SQL[] = [
+      gte(transaction.dateRequest, from),
+      lte(transaction.dateRequest, to),
+    ];
+
+    if (filters.merchantId?.length)
+      clauses.push(inArray(transaction.merchantId, filters.merchantId));
+    if (filters.providerId?.length)
+      clauses.push(inArray(transaction.providerId, filters.providerId));
+    if (filters.countryId?.length)
+      clauses.push(inArray(transaction.countryId, filters.countryId));
+    if (filters.payMethodId?.length)
+      clauses.push(inArray(transaction.payMethodId, filters.payMethodId));
+
+    return await db
+      .select({
+        merchantId: transaction.merchantId,
+        providerId: transaction.providerId,
+        payMethodId: transaction.payMethodId,
+        status: transaction.status,
+        dateRequest: transaction.dateRequest,
+      })
+      .from(transaction)
+      .where(and(...clauses));
+  }
+
+  async getEarliestTransactionDate(filters?: {
+    merchantId?: string[];
+    providerId?: string[];
+    countryId?: string[];
+    payMethodId?: string[];
+  }) {
+    const clauses: SQL[] = [];
+
+    if (filters?.merchantId?.length)
+      clauses.push(inArray(transaction.merchantId, filters.merchantId));
+    if (filters?.providerId?.length)
+      clauses.push(inArray(transaction.providerId, filters.providerId));
+    if (filters?.countryId?.length)
+      clauses.push(inArray(transaction.countryId, filters.countryId));
+    if (filters?.payMethodId?.length)
+      clauses.push(inArray(transaction.payMethodId, filters.payMethodId));
+
+    const whereClause = clauses.length > 0 ? and(...clauses) : undefined;
+
+    const [result] = await db
+      .select({ minDate: sql<Date>`min(${transaction.dateRequest})` })
+      .from(transaction)
+      .where(whereClause);
+
+    return result?.minDate ?? null;
+  }
 
   async findWithFilter(filters: StatsFilterSchemaType) {
     const clauses: SQL[] = [];

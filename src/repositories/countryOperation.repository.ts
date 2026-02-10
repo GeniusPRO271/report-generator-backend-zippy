@@ -63,6 +63,21 @@ export class CountryOperationRepository {
     return record;
   }
 
+  async findByMerchantAndCountry(
+    merchantId: string,
+    countryId: string
+  ): Promise<CountryOperationSchemaType[]> {
+    return await db
+      .select()
+      .from(countryOperation)
+      .where(
+        and(
+          eq(countryOperation.merchantId, merchantId),
+          eq(countryOperation.countryId, countryId)
+        )
+      );
+  }
+
   async ensureExists(data) {
     const [existing] = await db
       .select()

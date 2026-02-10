@@ -1,4 +1,4 @@
-import { bigint, boolean, integer, numeric, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, integer, numeric, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 export const report = pgTable('report', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -25,7 +25,9 @@ export const provider = pgTable("provider", {
   priority: integer("priority").default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (t) => [
+  index("idx_provider_name").on(t.name),
+]);
 
 export const merchant = pgTable("merchant", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -39,7 +41,9 @@ export const merchant = pgTable("merchant", {
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (t) => [
+  index("idx_merchant_name").on(t.name),
+]);
 
 export const merchantAPIConfig = pgTable("merchant_api_config", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -86,7 +90,9 @@ export const payMethod = pgTable("pay_method", {
   fixedFee: numeric("fixed_fee").default("0"),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (t) => [
+  index("idx_pay_method_name").on(t.name),
+]);
 
 export const countryOperation = pgTable("country_operation", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -114,7 +120,10 @@ export const countryOperation = pgTable("country_operation", {
   overrideFixedFee: numeric("override_fixed_fee"),
   isActive: boolean("is_active").default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (t) => [
+  index("idx_country_op_merchant_country").on(t.merchantId, t.countryId),
+  index("idx_country_op_lookup").on(t.merchantId, t.providerId, t.countryId, t.payMethodId),
+]);
 
 export const user = pgTable("user", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -159,5 +168,9 @@ export const transaction = pgTable("transaction", {
   }).notNull(),
   isTest: boolean("is_test").default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (t) => [
+  index("idx_transaction_commerce_req_id").on(t.commerceReqId),
+  index("idx_transaction_date_request").on(t.dateRequest),
+  index("idx_transaction_merchant_country").on(t.merchantId, t.countryId),
+]);
 

@@ -14,6 +14,7 @@ interface MethodParameter {
   methodId: string;
   methodName: string;
   commissionFormula: string;
+  type: "PAYIN" | "PAYOUT";
 }
 
 interface ProviderParameter {
@@ -205,8 +206,6 @@ export class ExcelGenerator {
     reportId: string,
   ): Promise<string> {
     const logs: string[] = [];
-    const LOG_TX_LIMIT = 50;
-    let loggedTx = 0;
 
     const pushLog = (msg: string) => {
       const line = `[${new Date().toISOString()}] ${msg}`;
@@ -244,6 +243,14 @@ export class ExcelGenerator {
       commissionMap.set(providerKey, methodMap);
     }
 
+    // Build method name -> PAYIN/PAYOUT type lookup
+    const methodTypeMap = new Map<string, "PAYIN" | "PAYOUT">();
+    for (const provider of parameters.providers) {
+      for (const method of provider.methods) {
+        methodTypeMap.set(method.methodName.toLowerCase(), method.type);
+      }
+    }
+
     const allMethods = [
       ...new Set(
         parameters.providers.flatMap((p) => p.methods.map((m) => m.methodName)),
@@ -258,7 +265,11 @@ export class ExcelGenerator {
       txByMethod.set(key, list);
     }
 
-    const methodTotals: { method: string; total: number }[] = [];
+    const methodTotals: {
+      method: string;
+      total: number;
+      type: "PAYIN" | "PAYOUT";
+    }[] = [];
     const usedSheetNames = new Set<string>();
 
     const setBorders = (row: ExcelJS.Row) => {
@@ -279,22 +290,22 @@ export class ExcelGenerator {
       const sheetName = this.makeUniqueSheetName(desiredName, usedSheetNames);
       const sheet = workbook.addWorksheet(sheetName);
 
+      // Columns: Date(A), Name(B), Document ID(C), Amount(D), Id Commerce(E),
+      //          Commission Formula(F), Tot Commission(G), Total(H)
       sheet.columns = [
-        { header: "Date", key: "date", width: 20 },
+        { header: "Date", key: "date", width: 22 },
         { header: "Name", key: "name", width: 25 },
         { header: "Document ID", key: "documentId", width: 20 },
         { header: "Amount", key: "amount", width: 15 },
-        { header: "Operation Code", key: "operationCode", width: 20 },
-        // ADDED/KEPT: Id Commerce
         { header: "Id Commerce", key: "idCommerce", width: 24 },
         { header: "Commission Formula", key: "formulaText", width: 40 },
         { header: "Tot Commission", key: "totalCommission", width: 20 },
         { header: "Total", key: "total", width: 20 },
       ];
 
-      sheet.getColumn("amount").numFmt = "#,##0.00";
-      sheet.getColumn("totalCommission").numFmt = "#,##0.00";
-      sheet.getColumn("total").numFmt = "#,##0.00";
+      sheet.getColumn("amount").numFmt = "#,##0";
+      sheet.getColumn("totalCommission").numFmt = "#,##0";
+      sheet.getColumn("total").numFmt = "#,##0";
 
       const headerRow = sheet.getRow(1);
       headerRow.font = { bold: true };
@@ -318,12 +329,16 @@ export class ExcelGenerator {
         const excelFormula = formula.replace(/amount/g, amount.toString());
         const totalFormula = `${amount} - (${excelFormula})`;
 
+        // Convert date to Chilean timezone
+        const dateStr = DateTime.fromISO(tx.dateRequest, { setZone: true })
+          .setZone(this.reportZoneDefault)
+          .toFormat("dd/MM/yyyy HH:mm:ss");
+
         const row = sheet.addRow({
-          date: new Date(tx.dateRequest).toISOString(),
+          date: dateStr,
           name: tx.name,
           documentId: tx.documentId,
           amount,
-          operationCode: tx.code,
           idCommerce: tx.commerceReqId,
           formulaText: formula,
           totalCommission: { formula: excelFormula },
@@ -341,12 +356,11 @@ export class ExcelGenerator {
 
         const firstDataRow = 2;
 
-        // Column letters after removing ID Zippy:
-        // Amount = D, Tot Commission = H, Total = I
+        // Amount = D, Tot Commission = G, Total = H
         const totalRow = sheet.addRow({
           amount: { formula: `SUM(D${firstDataRow}:D${lastDataRow})` },
-          totalCommission: { formula: `SUM(H${firstDataRow}:H${lastDataRow})` },
-          total: { formula: `SUM(I${firstDataRow}:I${lastDataRow})` },
+          totalCommission: { formula: `SUM(G${firstDataRow}:G${lastDataRow})` },
+          total: { formula: `SUM(H${firstDataRow}:H${lastDataRow})` },
         });
 
         totalRow.font = { bold: true };
@@ -354,9 +368,16 @@ export class ExcelGenerator {
         setBorders(totalRow);
       }
 
-      methodTotals.push({ method: methodName, total: amountTotal });
+      const methodType =
+        methodTypeMap.get(methodName.toLowerCase()) ?? "PAYIN";
+      methodTotals.push({
+        method: methodName,
+        total: amountTotal,
+        type: methodType,
+      });
     }
 
+    // ── RESUME sheet ──
     const resumeSheetName = this.makeUniqueSheetName("RESUME", usedSheetNames);
     const resumeSheet = workbook.addWorksheet(resumeSheetName);
 
@@ -365,14 +386,19 @@ export class ExcelGenerator {
       { header: "Value", key: "value", width: 20 },
     ];
 
-    resumeSheet.getColumn("value").numFmt = "#,##0.00";
+    resumeSheet.getColumn("value").numFmt = "#,##0";
 
     const resumeHeader = resumeSheet.getRow(1);
     resumeHeader.font = { bold: true };
     resumeHeader.alignment = { vertical: "middle", horizontal: "center" };
     setBorders(resumeHeader);
 
-    for (const item of methodTotals) {
+    // Separate PAYIN and PAYOUT methods
+    const payinMethods = methodTotals.filter((m) => m.type === "PAYIN");
+    const payoutMethods = methodTotals.filter((m) => m.type === "PAYOUT");
+
+    // List PAYIN methods
+    for (const item of payinMethods) {
       const row = resumeSheet.addRow({
         method: (item.method ?? "").toUpperCase(),
         value: item.total,
@@ -390,16 +416,24 @@ export class ExcelGenerator {
       setBorders(row);
     }
 
-    const grossTotal = methodTotals.reduce((s, m) => s + m.total, 0);
+    // List PAYOUT methods (shown as negative)
+    for (const item of payoutMethods) {
+      const row = resumeSheet.addRow({
+        method: `${(item.method ?? "").toUpperCase()} (PAYOUT)`,
+        value: -item.total,
+      });
 
-    const grossRow = resumeSheet.addRow({
-      method: "GROSS TOTAL",
-      value: grossTotal,
-    });
-
-    grossRow.font = { bold: true };
-    grossRow.alignment = { vertical: "middle", horizontal: "center" };
-    setBorders(grossRow);
+      row.getCell("method").font = { bold: true };
+      row.getCell("method").alignment = {
+        vertical: "middle",
+        horizontal: "left",
+      };
+      row.getCell("value").alignment = {
+        vertical: "middle",
+        horizontal: "center",
+      };
+      setBorders(row);
+    }
 
     const earlyPaymentProvided =
       parameters.earlyPayment !== undefined &&
@@ -427,7 +461,6 @@ export class ExcelGenerator {
       ? parseMoney(parameters.retention as any)
       : 0;
 
-    // Show adjustments in the SAME table as methods
     if (earlyPaymentProvided) {
       const row = resumeSheet.addRow({
         method: "EARLY PAYMENT",
@@ -446,16 +479,18 @@ export class ExcelGenerator {
       setBorders(row);
     }
 
-    if (earlyPaymentProvided || retentionProvided) {
-      const netTotal = grossTotal - earlyPayment - retention;
-      const netRow = resumeSheet.addRow({
-        method: "NET TOTAL",
-        value: netTotal,
-      });
-      netRow.font = { bold: true };
-      netRow.alignment = { vertical: "middle", horizontal: "center" };
-      setBorders(netRow);
-    }
+    // TOTAL = sum(PAYIN) - sum(PAYOUT) - earlyPayment - retention
+    const payinTotal = payinMethods.reduce((s, m) => s + m.total, 0);
+    const payoutTotal = payoutMethods.reduce((s, m) => s + m.total, 0);
+    const total = payinTotal - payoutTotal - earlyPayment - retention;
+
+    const totalRow = resumeSheet.addRow({
+      method: "TOTAL",
+      value: total,
+    });
+    totalRow.font = { bold: true };
+    totalRow.alignment = { vertical: "middle", horizontal: "center" };
+    setBorders(totalRow);
 
     resumeSheet.columns.forEach((col) => {
       col.alignment = { vertical: "middle", horizontal: "center" };

@@ -14,6 +14,7 @@ import { MerchantRepository } from "../repositories/merchant.repository";
 import { ProviderRepository } from "../repositories/provider.repository";
 import { CountryRepository } from "../repositories/country.repository";
 import { PayMethodRepository } from "../repositories/payMethod.repository";
+import { CountryOperationRepository } from "../repositories/countryOperation.repository";
 
 import { CreateReportRequest } from "../types/zod/report";
 import { ReportTransactionSchemaType } from "../types/zod";
@@ -49,6 +50,7 @@ type FinanceGeneratorParameters = {
       methodId: string;
       methodName: string;
       commissionFormula: string;
+      type: "PAYIN" | "PAYOUT";
     }>;
   }>;
 };
@@ -74,6 +76,7 @@ export class ReportWorker {
     private readonly providerRepository: ProviderRepository,
     private readonly countryRepository: CountryRepository,
     private readonly payMethodRepository: PayMethodRepository,
+    private readonly countryOperationRepository: CountryOperationRepository,
   ) {
     this.baseConnection = new IORedis(config.redisUrl, {
       maxRetriesPerRequest: null,
@@ -225,15 +228,11 @@ export class ReportWorker {
       let filePath: string;
 
       if (payload.reportType === "finance") {
-        const rawTx = await this.transactionRepository.findWithDateRange(
+        const scopedTx = await this.transactionRepository.findWithDateRangeAndFilters(
           fromDate,
           toDate,
-        );
-
-        const scopedTx = rawTx.filter(
-          (t) =>
-            t.merchantId === payload.reportParams.merchantId &&
-            t.countryId === payload.reportParams.countryId,
+          payload.reportParams.merchantId,
+          payload.reportParams.countryId,
         );
 
         const [txForReport, generatorParams] = await Promise.all([
@@ -323,8 +322,10 @@ export class ReportWorker {
     fromDate: Date;
     toDate: Date;
   } {
-    const from = DateTime.fromISO(payload.dateRange.from, { setZone: true });
-    const to = DateTime.fromISO(payload.dateRange.to, { setZone: true });
+    const tz = payload.dateRange.timezone || "America/Santiago";
+
+    const from = DateTime.fromISO(payload.dateRange.from, { zone: tz });
+    const to = DateTime.fromISO(payload.dateRange.to, { zone: tz });
 
     if (!from.isValid) {
       throw new Error(`Invalid from: ${payload.dateRange.from}`);
@@ -334,7 +335,10 @@ export class ReportWorker {
       throw new Error(`Invalid to: ${payload.dateRange.to}`);
     }
 
-    return { fromDate: from.toJSDate(), toDate: to.toJSDate() };
+    return {
+      fromDate: from.startOf("day").toJSDate(),
+      toDate: to.endOf("day").toJSDate(),
+    };
   }
 
   private async buildFinanceGeneratorParameters(
@@ -349,18 +353,32 @@ export class ReportWorker {
       p.methods.map((m: any) => m.payMethodId),
     );
 
-    const [merchant, country, providers, payMethods] = await Promise.all([
-      this.merchantRepository.findById(merchantId),
-      this.countryRepository.findById(countryId),
-      this.providerRepository.findByIds(providerIds),
-      this.payMethodRepository.findByIds(payMethodIds),
-    ]);
+    const [merchant, country, providers, payMethods, countryOps] =
+      await Promise.all([
+        this.merchantRepository.findById(merchantId),
+        this.countryRepository.findById(countryId),
+        this.providerRepository.findByIds(providerIds),
+        this.payMethodRepository.findByIds(payMethodIds),
+        this.countryOperationRepository.findByMerchantAndCountry(
+          merchantId,
+          countryId,
+        ),
+      ]);
 
     if (!merchant) throw new Error(`Merchant not found: ${merchantId}`);
     if (!country) throw new Error(`Country not found: ${countryId}`);
 
     const providerMap = new Map(providers.map((p) => [p.id, p]));
     const payMethodMap = new Map(payMethods.map((m) => [m.id, m]));
+
+    // Build lookup: "providerId|payMethodId" -> type
+    const opTypeMap = new Map<string, "PAYIN" | "PAYOUT">();
+    for (const op of countryOps) {
+      opTypeMap.set(
+        `${op.providerId}|${op.payMethodId}`,
+        op.type as "PAYIN" | "PAYOUT",
+      );
+    }
 
     return {
       merchantName: merchant.name,
@@ -381,10 +399,14 @@ export class ReportWorker {
             const pm = payMethodMap.get(m.payMethodId);
             if (!pm) throw new Error(`PayMethod not found: ${m.payMethodId}`);
 
+            const opType =
+              opTypeMap.get(`${provider.id}|${pm.id}`) ?? "PAYIN";
+
             return {
               methodId: pm.id,
               methodName: pm.name,
               commissionFormula: m.commissionFormula,
+              type: opType,
             };
           }),
         };

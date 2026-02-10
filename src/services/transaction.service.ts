@@ -213,25 +213,38 @@ export class TransactionService {
   private async validateForeignKeys(
     data: TransactionSchemaType | UpdateTransactionSchemaType
   ) {
+    const checks: Promise<void>[] = [];
+
     if (data.merchantId) {
-      const m = await this.merchantRepository.findById(data.merchantId);
-      if (!m) throw new Error("Merchant not found");
+      checks.push(
+        this.merchantRepository.findById(data.merchantId).then((m) => {
+          if (!m) throw new Error("Merchant not found");
+        }),
+      );
     }
-
     if (data.providerId) {
-      const p = await this.providerRepository.findById(data.providerId);
-      if (!p) throw new Error("Provider not found");
+      checks.push(
+        this.providerRepository.findById(data.providerId).then((p) => {
+          if (!p) throw new Error("Provider not found");
+        }),
+      );
     }
-
     if (data.countryId) {
-      const c = await this.countryRepository.findById(data.countryId);
-      if (!c) throw new Error("Country not found");
+      checks.push(
+        this.countryRepository.findById(data.countryId).then((c) => {
+          if (!c) throw new Error("Country not found");
+        }),
+      );
+    }
+    if (data.payMethodId) {
+      checks.push(
+        this.payMethodRepository.findById(data.payMethodId).then((pm) => {
+          if (!pm) throw new Error("Pay method not found");
+        }),
+      );
     }
 
-    if (data.payMethodId) {
-      const pm = await this.payMethodRepository.findById(data.payMethodId);
-      if (!pm) throw new Error("Pay method not found");
-    }
+    await Promise.all(checks);
   }
 
   async create(data: InsertTransactionSchemaType) {
@@ -244,45 +257,87 @@ export class TransactionService {
   }
 
   async findAll(page: number, limit: number) {
-    const transactions = await this.transactionRepository.findAll();
+    page = Math.max(1, page);
+    limit = Math.max(1, limit);
 
-    const results = [];
+    const [total, transactions] = await Promise.all([
+      this.transactionRepository.count(),
+      this.transactionRepository.find(page, limit),
+    ]);
 
-    for (const t of transactions) {
-      const merchant = await this.merchantRepository.findById(t.merchantId);
-      const provider = await this.providerRepository.findById(t.providerId);
-      const country = await this.countryRepository.findById(t.countryId);
-      const payMethod = await this.payMethodRepository.findById(t.payMethodId);
+    const merchantIds = [...new Set(transactions.map((t) => t.merchantId))];
+    const providerIds = [...new Set(transactions.map((t) => t.providerId))];
+    const countryIds = [...new Set(transactions.map((t) => t.countryId))];
+    const methodIds = [...new Set(transactions.map((t) => t.payMethodId))];
 
-      results.push({
-        ...t,
-        merchant,
-        provider,
-        country,
-        payMethod,
-      });
-    }
+    const [merchants, providers, countries, methods] = await Promise.all([
+      this.merchantRepository.findByIds(merchantIds),
+      this.providerRepository.findByIds(providerIds),
+      this.countryRepository.findByIds(countryIds),
+      this.payMethodRepository.findByIds(methodIds),
+    ]);
 
-    return results;
+    const merchantMap = new Map(merchants.map((m) => [m.id, m]));
+    const providerMap = new Map(providers.map((p) => [p.id, p]));
+    const countryMap = new Map(countries.map((c) => [c.id, c]));
+    const methodMap = new Map(methods.map((m) => [m.id, m]));
+
+    const results = transactions.map((t) => ({
+      ...t,
+      merchant: merchantMap.get(t.merchantId),
+      provider: providerMap.get(t.providerId),
+      country: countryMap.get(t.countryId),
+      payMethod: methodMap.get(t.payMethodId),
+    }));
+
+    const totalPages = Math.ceil(total / limit);
+
+    return {
+      data: results,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
+    };
   }
 
   async findAllVersion2(page: number, limit: number) {
     page = Math.max(1, page);
     limit = Math.max(1, limit);
 
-    const total = await this.transactionRepository.count();
+    const [total, transactions] = await Promise.all([
+      this.transactionRepository.count(),
+      this.transactionRepository.find(page, limit),
+    ]);
 
-    const transactions = await this.transactionRepository.find(page, limit);
+    const merchantIds = [...new Set(transactions.map((t) => t.merchantId))];
+    const providerIds = [...new Set(transactions.map((t) => t.providerId))];
+    const countryIds = [...new Set(transactions.map((t) => t.countryId))];
+    const methodIds = [...new Set(transactions.map((t) => t.payMethodId))];
+
+    const [merchants, providers, countries, methods] = await Promise.all([
+      this.merchantRepository.findByIds(merchantIds),
+      this.providerRepository.findByIds(providerIds),
+      this.countryRepository.findByIds(countryIds),
+      this.payMethodRepository.findByIds(methodIds),
+    ]);
+
+    const merchantMap = new Map(merchants.map((m) => [m.id, m]));
+    const providerMap = new Map(providers.map((p) => [p.id, p]));
+    const countryMap = new Map(countries.map((c) => [c.id, c]));
+    const methodMap = new Map(methods.map((m) => [m.id, m]));
 
     const results: BaseTransaction[] = [];
 
     for (const t of transactions) {
-      const [merchant, provider, country, payMethod] = await Promise.all([
-        this.merchantRepository.findById(t.merchantId),
-        this.providerRepository.findById(t.providerId),
-        this.countryRepository.findById(t.countryId),
-        this.payMethodRepository.findById(t.payMethodId),
-      ]);
+      const merchant = merchantMap.get(t.merchantId);
+      const provider = providerMap.get(t.providerId);
+      const country = countryMap.get(t.countryId);
+      const payMethod = methodMap.get(t.payMethodId);
 
       if (!merchant || !provider || !country || !payMethod) continue;
 
@@ -321,7 +376,7 @@ export class TransactionService {
         totalPages,
         hasNextPage: page < totalPages,
         hasPrevPage: page > 1,
-      }
+      },
     };
   }
 
@@ -351,37 +406,101 @@ export class TransactionService {
   }
 
   async importTransactions(jsonArray: any[]) {
-    const results = [];
+    const results: any[] = [];
+
+    // Batch duplicate check — 1 query instead of N
+    const allCommerceReqIds = jsonArray
+      .map((r) => r.commerceReqId)
+      .filter(Boolean);
+    const existingTxs =
+      await this.transactionRepository.findByCommerceIds(allCommerceReqIds);
+    const existingMap = new Map(
+      existingTxs.map((t) => [t.commerceReqId, t]),
+    );
+
+    // In-memory caches for this batch
+    const merchantCache = new Map<string, any>();
+    const providerCache = new Map<string, any>();
+    const countryCache = new Map<string, any>();
+    const payMethodCache = new Map<string, any>();
+    const countryOpCache = new Set<string>();
 
     for (const raw of jsonArray) {
       try {
-        const existing = await this.transactionRepository.findByCommerceId(raw.commerceReqId);
+        const existing = existingMap.get(raw.commerceReqId);
 
         if (existing) {
-          results.push({
-            success: false,
-            skipped: true,
-            reason: "Duplicate commerceReqId",
-            commerceReqId: raw.commerceReqId,
-            type: "PAYIN",
-          });
+          if (raw.status === "ok" && existing.status !== "ok") {
+            await this.transactionRepository.update(existing.id, {
+              status: "ok",
+            });
+            results.push({
+              success: true,
+              updated: true,
+              reason: "Status updated to ok",
+              id: existing.id,
+              commerceReqId: raw.commerceReqId,
+              type: "PAYIN",
+            });
+          } else {
+            results.push({
+              success: false,
+              skipped: true,
+              reason: "Duplicate commerceReqId",
+              commerceReqId: raw.commerceReqId,
+              type: "PAYIN",
+            });
+          }
           continue;
         }
 
-        const merchant = await this.findOrCreateMerchant(raw.merchantName, raw.email);
-        const provider = await this.findOrCreateProvider(raw.provider);
-        const country = await this.findOrCreateCountry(raw.country, raw.currency);
-        const payMethod = await this.findOrCreatePayMethod(raw.payMethod, provider.id, country.id);
+        // Cache-aware entity resolution
+        let merchant = merchantCache.get(raw.merchantName);
+        if (!merchant) {
+          merchant = await this.findOrCreateMerchant(raw.merchantName, raw.email);
+          merchantCache.set(raw.merchantName, merchant);
+        }
 
-        await this.ensureCountryOperationExists({
-          merchantId: merchant.id,
-          providerId: provider.id,
-          countryId: country.id,
-          payMethodId: payMethod.id,
-          type: "PAYIN",
-        });
+        let provider = providerCache.get(raw.provider);
+        if (!provider) {
+          provider = await this.findOrCreateProvider(raw.provider);
+          providerCache.set(raw.provider, provider);
+        }
 
-        const dateRequest = this.parseDateRequest(raw.dateRequest, raw.commerceReqId);
+        const countryKey = `${raw.country}|${raw.currency}`;
+        let country = countryCache.get(countryKey);
+        if (!country) {
+          country = await this.findOrCreateCountry(raw.country, raw.currency);
+          countryCache.set(countryKey, country);
+        }
+
+        const pmKey = `${raw.payMethod}|${provider.id}|${country.id}`;
+        let payMethod = payMethodCache.get(pmKey);
+        if (!payMethod) {
+          payMethod = await this.findOrCreatePayMethod(
+            raw.payMethod,
+            provider.id,
+            country.id,
+          );
+          payMethodCache.set(pmKey, payMethod);
+        }
+
+        const opKey = `${merchant.id}|${provider.id}|${country.id}|${payMethod.id}`;
+        if (!countryOpCache.has(opKey)) {
+          await this.ensureCountryOperationExists({
+            merchantId: merchant.id,
+            providerId: provider.id,
+            countryId: country.id,
+            payMethodId: payMethod.id,
+            type: "PAYIN",
+          });
+          countryOpCache.add(opKey);
+        }
+
+        const dateRequest = this.parseDateRequest(
+          raw.dateRequest,
+          raw.commerceReqId,
+        );
 
         const transactionData = {
           merchantId: merchant.id,
@@ -405,18 +524,8 @@ export class TransactionService {
           isTest: raw.zippy_test ?? false,
         };
 
-        let createdTx;
-        try {
-          createdTx = await this.transactionRepository.create(transactionData);
-        } catch (dbError: any) {
-          throw new Error(
-            `Database insert failed: ${dbError.message}\n` +
-            `Code: ${dbError.code || 'N/A'}\n` +
-            `Detail: ${dbError.detail || 'N/A'}\n` +
-            `Constraint: ${dbError.constraint || 'N/A'}\n` +
-            `Column: ${dbError.column || 'N/A'}`
-          );
-        }
+        const createdTx =
+          await this.transactionRepository.create(transactionData);
 
         results.push({
           success: true,
@@ -424,17 +533,12 @@ export class TransactionService {
           type: "PAYIN",
           commerceReqId: raw.commerceReqId,
         });
-
       } catch (err: any) {
         results.push({
           success: false,
           type: "PAYIN",
           error: err.message,
-          errorCode: err.code,
-          errorDetail: err.detail,
-          errorConstraint: err.constraint,
-          stack: err.stack,
-          data: raw,
+          commerceReqId: raw.commerceReqId,
         });
       }
     }
@@ -446,75 +550,125 @@ export class TransactionService {
    * Import PayOut transactions
    */
   async importPayouts(jsonArray: any[]) {
-    const results = [];
+    const results: any[] = [];
+
+    // Batch duplicate check — 1 query instead of N
+    const allCommerceReqIds = jsonArray
+      .map((r) => r.commerceReqId)
+      .filter(Boolean);
+    const existingTxs =
+      await this.transactionRepository.findByCommerceIds(allCommerceReqIds);
+    const existingMap = new Map(
+      existingTxs.map((t) => [t.commerceReqId, t]),
+    );
+
+    // In-memory caches for this batch
+    const merchantCache = new Map<string, any>();
+    const providerCache = new Map<string, any>();
+    const countryCache = new Map<string, any>();
+    const payoutMethodCache = new Map<string, any>();
+    const countryOpCache = new Set<string>();
 
     for (const raw of jsonArray) {
       try {
-        const existing = await this.transactionRepository.findByCommerceId(raw.commerceReqId);
+        const existing = existingMap.get(raw.commerceReqId);
 
         if (existing) {
-          results.push({
-            success: false,
-            skipped: true,
-            reason: "Duplicate commerceReqId",
-            commerceReqId: raw.commerceReqId,
-            type: "PAYOUT",
-          });
+          const incomingStatus = raw.status || "pending";
+          if (incomingStatus === "ok" && existing.status !== "ok") {
+            await this.transactionRepository.update(existing.id, {
+              status: "ok",
+            });
+            results.push({
+              success: true,
+              updated: true,
+              reason: "Status updated to ok",
+              id: existing.id,
+              commerceReqId: raw.commerceReqId,
+              type: "PAYOUT",
+            });
+          } else {
+            results.push({
+              success: false,
+              skipped: true,
+              reason: "Duplicate commerceReqId",
+              commerceReqId: raw.commerceReqId,
+              type: "PAYOUT",
+            });
+          }
           continue;
         }
 
-        const merchant = await this.findOrCreateMerchant(raw.merchantName, raw.email);
-        const provider = await this.findOrCreateProvider(raw.provider);
-        const country = await this.findOrCreateCountry(raw.country, raw.currency);
+        // Cache-aware entity resolution
+        let merchant = merchantCache.get(raw.merchantName);
+        if (!merchant) {
+          merchant = await this.findOrCreateMerchant(raw.merchantName, raw.email);
+          merchantCache.set(raw.merchantName, merchant);
+        }
 
-        const payMethod = await this.findOrCreatePayoutMethod(provider.id, country.id);
+        let provider = providerCache.get(raw.provider);
+        if (!provider) {
+          provider = await this.findOrCreateProvider(raw.provider);
+          providerCache.set(raw.provider, provider);
+        }
 
-        await this.ensureCountryOperationExists({
-          merchantId: merchant.id,
-          providerId: provider.id,
-          countryId: country.id,
-          payMethodId: payMethod.id,
-          type: "PAYOUT",
-        });
+        const countryKey = `${raw.country}|${raw.currency}`;
+        let country = countryCache.get(countryKey);
+        if (!country) {
+          country = await this.findOrCreateCountry(raw.country, raw.currency);
+          countryCache.set(countryKey, country);
+        }
 
-        // Parse date
-        const dateRequest = this.parseDateRequest(raw.dateRequest, raw.commerceReqId);
+        const pmKey = `${provider.id}|${country.id}`;
+        let payMethod = payoutMethodCache.get(pmKey);
+        if (!payMethod) {
+          payMethod = await this.findOrCreatePayoutMethod(
+            provider.id,
+            country.id,
+          );
+          payoutMethodCache.set(pmKey, payMethod);
+        }
 
-        // Extract conciliation response data
+        const opKey = `${merchant.id}|${provider.id}|${country.id}|${payMethod.id}`;
+        if (!countryOpCache.has(opKey)) {
+          await this.ensureCountryOperationExists({
+            merchantId: merchant.id,
+            providerId: provider.id,
+            countryId: country.id,
+            payMethodId: payMethod.id,
+            type: "PAYOUT",
+          });
+          countryOpCache.add(opKey);
+        }
+
+        const dateRequest = this.parseDateRequest(
+          raw.dateRequest,
+          raw.commerceReqId,
+        );
+
         const conciliation = raw.conciliationResponse || {};
 
-        // Build PayOut transaction data
         const transactionData: any = {
           merchantId: merchant.id,
           providerId: provider.id,
           payMethodId: payMethod.id,
           countryId: country.id,
-          documentId: String(raw.documentId || conciliation.vat_id || ''),
-          quantity: String(raw.quantity || conciliation.amount || '0'),
+          documentId: String(raw.documentId || conciliation.vat_id || ""),
+          quantity: String(raw.quantity || conciliation.amount || "0"),
           commerceId: raw.commerceId,
           commerceReqId: raw.commerceReqId,
-          email: raw.email || conciliation.user_email || '',
-          name: raw.name || conciliation.name || '',
+          email: raw.email || conciliation.user_email || "",
+          name: raw.name || conciliation.name || "",
           requestTimestamp: Math.floor(Number(raw.request_timestamp) / 1000),
-          currency: raw.currency || conciliation.currency_code || '',
+          currency: raw.currency || conciliation.currency_code || "",
           dateRequest,
           code: Number(raw.code || 0),
-          status: raw.status || 'pending',
+          status: raw.status || "pending",
           isTest: raw.preparePayOut ?? false,
         };
 
-        let createdTx;
-        try {
-          createdTx = await this.transactionRepository.create(transactionData);
-        } catch (dbError: any) {
-          throw new Error(
-            `Database insert failed: ${dbError.message}\n` +
-            `Code: ${dbError.code || 'N/A'}\n` +
-            `Detail: ${dbError.detail || 'N/A'}\n` +
-            `Constraint: ${dbError.constraint || 'N/A'}\n` +
-            `Column: ${dbError.column || 'N/A'}`
-          );
-        }
+        const createdTx =
+          await this.transactionRepository.create(transactionData);
 
         results.push({
           success: true,
@@ -522,17 +676,12 @@ export class TransactionService {
           type: "PAYOUT",
           commerceReqId: raw.commerceReqId,
         });
-
       } catch (err: any) {
         results.push({
           success: false,
           type: "PAYOUT",
           error: err.message,
-          errorCode: err.code,
-          errorDetail: err.detail,
-          errorConstraint: err.constraint,
-          stack: err.stack,
-          data: raw,
+          commerceReqId: raw.commerceReqId,
         });
       }
     }
