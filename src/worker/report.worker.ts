@@ -42,6 +42,7 @@ type FinanceGeneratorParameters = {
    */
   earlyPayment?: string;
   retention?: string;
+  pending?: string;
 
   providers: Array<{
     providerId: string;
@@ -387,6 +388,7 @@ export class ReportWorker {
 
       earlyPayment: reportParams.earlyPayment,
       retention: reportParams.retention,
+      pending: reportParams.pending,
 
       providers: reportParams.providers.map((p: any) => {
         const provider = providerMap.get(p.providerId);

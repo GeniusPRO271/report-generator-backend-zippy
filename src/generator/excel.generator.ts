@@ -30,6 +30,7 @@ interface ApplicationParameters {
   providers: ProviderParameter[];
   earlyPayment?: string | number;
   retention?: string | number;
+  pending?: string | number;
 }
 
 type DateRange = { label: string; start: Date; end: Date };
@@ -315,6 +316,7 @@ export class ExcelGenerator {
       const methodTx = txByMethod.get(methodName.toLowerCase()) ?? [];
 
       let amountTotal = 0;
+      let netTotal = 0;
       let lastDataRow = 1;
 
       for (const tx of methodTx) {
@@ -325,6 +327,8 @@ export class ExcelGenerator {
 
         const amount = Number(tx.quantity) || 0;
         amountTotal += amount;
+        const commission = this.evaluateCommissionCached(formula, amount);
+        netTotal += amount - commission;
 
         const excelFormula = formula.replace(/amount/g, amount.toString());
         const totalFormula = `${amount} - (${excelFormula})`;
@@ -372,7 +376,7 @@ export class ExcelGenerator {
         methodTypeMap.get(methodName.toLowerCase()) ?? "PAYIN";
       methodTotals.push({
         method: methodName,
-        total: amountTotal,
+        total: netTotal,
         type: methodType,
       });
     }
@@ -397,54 +401,7 @@ export class ExcelGenerator {
     const payinMethods = methodTotals.filter((m) => m.type === "PAYIN");
     const payoutMethods = methodTotals.filter((m) => m.type === "PAYOUT");
 
-    // List PAYIN methods
-    for (const item of payinMethods) {
-      const row = resumeSheet.addRow({
-        method: (item.method ?? "").toUpperCase(),
-        value: item.total,
-      });
-
-      row.getCell("method").font = { bold: true };
-      row.getCell("method").alignment = {
-        vertical: "middle",
-        horizontal: "left",
-      };
-      row.getCell("value").alignment = {
-        vertical: "middle",
-        horizontal: "center",
-      };
-      setBorders(row);
-    }
-
-    // List PAYOUT methods (shown as negative)
-    for (const item of payoutMethods) {
-      const row = resumeSheet.addRow({
-        method: `${(item.method ?? "").toUpperCase()} (PAYOUT)`,
-        value: -item.total,
-      });
-
-      row.getCell("method").font = { bold: true };
-      row.getCell("method").alignment = {
-        vertical: "middle",
-        horizontal: "left",
-      };
-      row.getCell("value").alignment = {
-        vertical: "middle",
-        horizontal: "center",
-      };
-      setBorders(row);
-    }
-
-    const earlyPaymentProvided =
-      parameters.earlyPayment !== undefined &&
-      parameters.earlyPayment !== null &&
-      String(parameters.earlyPayment).trim() !== "";
-
-    const retentionProvided =
-      parameters.retention !== undefined &&
-      parameters.retention !== null &&
-      String(parameters.retention).trim() !== "";
-
+    // Parse optional money values upfront
     const parseMoney = (v: string | number): number => {
       const n = typeof v === "number" ? v : Number(String(v).trim());
       if (!Number.isFinite(n)) {
@@ -453,36 +410,55 @@ export class ExcelGenerator {
       return n;
     };
 
+    const isProvided = (v: string | number | undefined | null): boolean =>
+      v !== undefined && v !== null && String(v).trim() !== "";
+
+    const earlyPaymentProvided = isProvided(parameters.earlyPayment);
+    const retentionProvided = isProvided(parameters.retention);
+    const pendingProvided = isProvided(parameters.pending);
+
     const earlyPayment = earlyPaymentProvided
       ? parseMoney(parameters.earlyPayment as any)
       : 0;
-
     const retention = retentionProvided
       ? parseMoney(parameters.retention as any)
       : 0;
+    const pending = pendingProvided
+      ? parseMoney(parameters.pending as any)
+      : 0;
 
-    if (earlyPaymentProvided) {
-      const row = resumeSheet.addRow({
-        method: "EARLY PAYMENT",
-        value: -earlyPayment,
-      });
-      row.alignment = { vertical: "middle", horizontal: "center" };
+    const addResumeRow = (label: string, value: number | string, bold = false) => {
+      const row = resumeSheet.addRow({ method: label, value });
+      row.getCell("method").font = { bold: true };
+      row.getCell("method").alignment = { vertical: "middle", horizontal: "left" };
+      row.getCell("value").alignment = { vertical: "middle", horizontal: "center" };
+      if (bold) row.font = { bold: true };
       setBorders(row);
+    };
+
+    // 1. PENDING row (always shown, at top)
+    addResumeRow("PENDING", pendingProvided ? pending : "-");
+
+    // 2. PAYIN method rows (positive after-commission values)
+    for (const item of payinMethods) {
+      addResumeRow((item.method ?? "").toUpperCase(), item.total);
     }
 
-    if (retentionProvided) {
-      const row = resumeSheet.addRow({
-        method: "RETENTION",
-        value: -retention,
-      });
-      row.alignment = { vertical: "middle", horizontal: "center" };
-      setBorders(row);
+    // 3. PAYOUT method rows (positive after-commission values)
+    for (const item of payoutMethods) {
+      addResumeRow(`${(item.method ?? "").toUpperCase()} (PAYOUT)`, item.total);
     }
 
-    // TOTAL = sum(PAYIN) - sum(PAYOUT) - earlyPayment - retention
+    // 4. EARLY PAYMENT row (always shown)
+    addResumeRow("EARLY PAYMENT", earlyPaymentProvided ? earlyPayment : "-");
+
+    // 5. RETENTION row (always shown)
+    addResumeRow("RETENTION", retentionProvided ? retention : "-");
+
+    // 6. TOTAL = PayIn - PayOut - retention - earlyPayment + pending
     const payinTotal = payinMethods.reduce((s, m) => s + m.total, 0);
     const payoutTotal = payoutMethods.reduce((s, m) => s + m.total, 0);
-    const total = payinTotal - payoutTotal - earlyPayment - retention;
+    const total = payinTotal - payoutTotal - earlyPayment - retention + pending;
 
     const totalRow = resumeSheet.addRow({
       method: "TOTAL",

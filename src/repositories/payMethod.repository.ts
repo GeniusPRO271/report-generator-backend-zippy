@@ -1,7 +1,7 @@
 import { Service } from "typedi";
 import { db } from "../db/connection";
 import { payMethod } from "../db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { InsertPayMethodSchemaType, PayMethodSchemaType } from "../db/zodSchema/payMethod.schema";
 
 @Service()
@@ -40,6 +40,20 @@ export class PayMethodRepository {
   async findByName(name: string) {
     const [p] = await db.select().from(payMethod).where(eq(payMethod.name, name));
     return p;
+  }
+
+  async findByNameProviderCountry(name: string, providerId: string, countryId: string) {
+    const [pm] = await db
+      .select()
+      .from(payMethod)
+      .where(
+        and(
+          eq(payMethod.name, name),
+          eq(payMethod.providerId, providerId),
+          eq(payMethod.countryId, countryId)
+        )
+      );
+    return pm;
   }
 
 }

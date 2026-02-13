@@ -89,7 +89,7 @@ export class TransactionService {
     providerId: string,
     countryId: string
   ) {
-    let pm = await this.payMethodRepository.findByName(name);
+    let pm = await this.payMethodRepository.findByNameProviderCountry(name, providerId, countryId);
     if (pm) return pm;
 
     try {
@@ -102,7 +102,7 @@ export class TransactionService {
       });
     } catch (err: any) {
       if (err.message.includes("unique") || err.message.includes("duplicate")) {
-        pm = await this.payMethodRepository.findByName(name);
+        pm = await this.payMethodRepository.findByNameProviderCountry(name, providerId, countryId);
       } else throw err;
     }
     return pm;
@@ -116,7 +116,7 @@ export class TransactionService {
     countryId: string
   ) {
 
-    let pm = await this.payMethodRepository.findByName('payout');
+    let pm = await this.payMethodRepository.findByNameProviderCountry('payout', providerId, countryId);
 
     if (pm) return pm;
 
@@ -132,7 +132,7 @@ export class TransactionService {
       });
     } catch (err: any) {
       if (err.message.includes("unique") || err.message.includes("duplicate")) {
-        pm = await this.payMethodRepository.findByName('payout');
+        pm = await this.payMethodRepository.findByNameProviderCountry('payout', providerId, countryId);
       } else throw err;
     }
     return pm;
@@ -696,84 +696,39 @@ export class TransactionService {
    * Does NOT delete anything, just reports duplicates
    */
   async findDuplicates() {
-    console.log('\n========================================');
-    console.log('🔍 SEARCHING FOR DUPLICATE TRANSACTIONS');
-    console.log('========================================\n');
-
-    const allTransactions = await this.transactionRepository.findAll();
-
-    // Group transactions by commerceReqId
-    const grouped = new Map<string, TransactionSchemaType[]>();
-
-    for (const tx of allTransactions) {
-      const key = tx.commerceReqId;
-      if (!grouped.has(key)) {
-        grouped.set(key, []);
-      }
-      grouped.get(key)!.push(tx);
-    }
+    const duplicateIds = await this.transactionRepository.findDuplicateCommerceReqIds();
 
     const duplicateGroups: any[] = [];
     let totalDuplicates = 0;
 
-    // Find groups with duplicates
-    for (const [commerceReqId, transactions] of grouped) {
-      if (transactions.length > 1) {
-        // Sort by dateRequest
-        transactions.sort((a, b) => {
-          const dateA = new Date(a.dateRequest).getTime();
-          const dateB = new Date(b.dateRequest).getTime();
-          return dateA - dateB;
-        });
+    for (const { commerceReqId, count } of duplicateIds) {
+      const transactions = await this.transactionRepository.findByCommerceIds([commerceReqId]);
 
-        const group = {
-          commerceReqId,
-          count: transactions.length,
-          transactions: transactions.map(tx => ({
-            id: tx.id,
-            dateRequest: tx.dateRequest,
-            status: tx.status,
-            quantity: tx.quantity,
-            email: tx.email,
-            merchantId: tx.merchantId,
-            isTest: tx.isTest,
-          })),
-        };
+      transactions.sort((a, b) =>
+        new Date(a.dateRequest).getTime() - new Date(b.dateRequest).getTime()
+      );
 
-        duplicateGroups.push(group);
-        totalDuplicates += transactions.length - 1; // -1 because we keep one
-
-        // Log to console
-        console.log(`\n📋 Duplicate Group #${duplicateGroups.length}`);
-        console.log(`   commerceReqId: ${commerceReqId}`);
-        console.log(`   Total copies: ${transactions.length}`);
-        console.log(`   Duplicates to remove: ${transactions.length - 1}`);
-        console.log('   ---');
-
-        transactions.forEach((tx, index) => {
-          console.log(`   ${index === 0 ? '✅ KEEP' : '❌ DELETE'} [${index + 1}]:`);
-          console.log(`      ID: ${tx.id}`);
-          console.log(`      Date: ${new Date(tx.dateRequest).toISOString()}`);
-          console.log(`      Status: ${tx.status}`);
-          console.log(`      Amount: ${tx.quantity}`);
-          console.log(`      Email: ${tx.email}`);
-          console.log(`      Test: ${tx.isTest}`);
-        });
-      }
+      duplicateGroups.push({
+        commerceReqId,
+        count: transactions.length,
+        transactions: transactions.map(tx => ({
+          id: tx.id,
+          dateRequest: tx.dateRequest,
+          status: tx.status,
+          quantity: tx.quantity,
+          email: tx.email,
+          merchantId: tx.merchantId,
+          isTest: tx.isTest,
+        })),
+      });
+      totalDuplicates += transactions.length - 1;
     }
 
-    console.log('\n========================================');
-    console.log('📊 SUMMARY');
-    console.log('========================================');
-    console.log(`Total transactions: ${allTransactions.length}`);
-    console.log(`Unique commerceReqIds: ${grouped.size}`);
-    console.log(`Duplicate groups found: ${duplicateGroups.length}`);
-    console.log(`Total duplicates to delete: ${totalDuplicates}`);
-    console.log('========================================\n');
+    const totalTransactions = await this.transactionRepository.count();
 
     return {
-      totalTransactions: allTransactions.length,
-      uniqueCommerceReqIds: grouped.size,
+      totalTransactions,
+      uniqueCommerceReqIds: totalTransactions - totalDuplicates,
       duplicateGroupsFound: duplicateGroups.length,
       totalDuplicatesToDelete: totalDuplicates,
       duplicateGroups,
@@ -786,25 +741,11 @@ export class TransactionService {
    * Uses repository's findByCommerceId to verify each transaction before deletion
    */
   async deleteDuplicates() {
-    console.log('\n========================================');
-    console.log('🗑️  DELETING DUPLICATE TRANSACTIONS');
-    console.log('========================================\n');
+    const duplicateIds = await this.transactionRepository.findDuplicateCommerceReqIds();
 
-    const allTransactions = await this.transactionRepository.findAll();
-
-    // Group transactions by commerceReqId
-    const grouped = new Map<string, TransactionSchemaType[]>();
-
-    for (const tx of allTransactions) {
-      const key = tx.commerceReqId;
-      if (!grouped.has(key)) {
-        grouped.set(key, []);
-      }
-      grouped.get(key)!.push(tx);
-    }
-
+    const totalTransactions = await this.transactionRepository.count();
     const results = {
-      totalTransactions: allTransactions.length,
+      totalTransactions,
       duplicateGroups: 0,
       transactionsDeleted: 0,
       deletedIds: [] as string[],
@@ -812,85 +753,34 @@ export class TransactionService {
       errors: [] as any[],
     };
 
-    // Process each group
-    for (const [commerceReqId, transactions] of grouped) {
-      // Only process if there are duplicates
-      if (transactions.length > 1) {
-        results.duplicateGroups++;
+    for (const { commerceReqId } of duplicateIds) {
+      const transactions = await this.transactionRepository.findByCommerceIds([commerceReqId]);
+      if (transactions.length <= 1) continue;
 
-        console.log(`\n📋 Processing duplicate group: ${commerceReqId}`);
-        console.log(`   Found ${transactions.length} copies`);
+      results.duplicateGroups++;
 
-        // Sort by dateRequest to keep the oldest
-        transactions.sort((a, b) => {
-          const dateA = new Date(a.dateRequest).getTime();
-          const dateB = new Date(b.dateRequest).getTime();
-          return dateA - dateB;
-        });
+      transactions.sort((a, b) =>
+        new Date(a.dateRequest).getTime() - new Date(b.dateRequest).getTime()
+      );
 
-        // Verify in database using repository method
-        const dbCheck = await this.transactionRepository.findByCommerceId(commerceReqId);
-        if (!dbCheck) {
-          console.log(`   ⚠️  Warning: commerceReqId ${commerceReqId} not found in DB check`);
-        }
+      const toKeep = transactions[0];
+      const toDelete = transactions.slice(1);
 
-        // Keep the first (oldest), delete the rest
-        const toKeep = transactions[0];
-        const toDelete = transactions.slice(1);
+      results.kept.push({ commerceReqId, id: toKeep.id });
 
-        console.log(`   ✅ Keeping: ${toKeep.id} (${new Date(toKeep.dateRequest).toISOString()})`);
-        results.kept.push({
-          commerceReqId,
-          id: toKeep.id,
-        });
-
-        for (const tx of toDelete) {
-          try {
-            // Double-check in database before deleting
-            const exists = await this.transactionRepository.findById(tx.id);
-            if (!exists) {
-              console.log(`   ⚠️  Transaction ${tx.id} not found in database, skipping`);
-              results.errors.push({
-                id: tx.id,
-                commerceReqId,
-                error: 'Transaction not found in database',
-              });
-              continue;
-            }
-
-            await this.transactionRepository.delete(tx.id);
-            results.transactionsDeleted++;
-            results.deletedIds.push(tx.id);
-            console.log(`   ❌ Deleted: ${tx.id} (${new Date(tx.dateRequest).toISOString()})`);
-          } catch (err: any) {
-            console.error(`   ❌ Error deleting ${tx.id}: ${err.message}`);
-            results.errors.push({
-              id: tx.id,
-              commerceReqId,
-              error: err.message,
-            });
-          }
+      for (const tx of toDelete) {
+        try {
+          await this.transactionRepository.delete(tx.id);
+          results.transactionsDeleted++;
+          results.deletedIds.push(tx.id);
+        } catch (err: any) {
+          results.errors.push({
+            id: tx.id,
+            commerceReqId,
+            error: err.message,
+          });
         }
       }
-    }
-
-    console.log('\n========================================');
-    console.log('📊 DELETION SUMMARY');
-    console.log('========================================');
-    console.log(`Total transactions processed: ${results.totalTransactions}`);
-    console.log(`Duplicate groups found: ${results.duplicateGroups}`);
-    console.log(`Transactions deleted: ${results.transactionsDeleted}`);
-    console.log(`Transactions kept: ${results.kept.length}`);
-    console.log(`Errors: ${results.errors.length}`);
-    console.log('========================================\n');
-
-    if (results.errors.length > 0) {
-      console.log('⚠️  ERRORS ENCOUNTERED:');
-      results.errors.forEach((err, idx) => {
-        console.log(`   ${idx + 1}. ID: ${err.id}, commerceReqId: ${err.commerceReqId}`);
-        console.log(`      Error: ${err.error}`);
-      });
-      console.log('\n');
     }
 
     return {

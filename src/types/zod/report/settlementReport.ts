@@ -72,6 +72,7 @@ export const MerchantCountryCommissionParamsSchema = z
     // Optional money values
     earlyPayment: MoneySchema.optional(),
     retention: MoneySchema.optional(),
+    pending: MoneySchema.optional(),
 
     providers: z.array(ProviderCommissionInputSchema).min(1),
   })

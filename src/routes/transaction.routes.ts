@@ -46,22 +46,26 @@ transactionRoutes.post("/import", requireRole("superadmin"), async (c) => {
   if (!Array.isArray(data)) {
     return c.json({ error: "Expected an array of transactions" }, 400);
   }
-  const payins: any[] = [];
-  const payouts: any[] = [];
-  for (const item of data) {
-    const type = item.type?.toUpperCase();
-    if (type === 'PAYOUT') {
-      payouts.push(item);
+
+  // Partition by index to avoid duplicating the entire array
+  const payinIndices: number[] = [];
+  const payoutIndices: number[] = [];
+  for (let i = 0; i < data.length; i++) {
+    if (data[i].type?.toUpperCase() === 'PAYOUT') {
+      payoutIndices.push(i);
     } else {
-      payins.push(item);
+      payinIndices.push(i);
     }
   }
+
   const results: any[] = [];
-  if (payins.length > 0) {
+  if (payinIndices.length > 0) {
+    const payins = payinIndices.map(i => data[i]);
     const payinResults = await transactionService.importTransactions(payins);
     results.push(...payinResults);
   }
-  if (payouts.length > 0) {
+  if (payoutIndices.length > 0) {
+    const payouts = payoutIndices.map(i => data[i]);
     const payoutResults = await transactionService.importPayouts(payouts);
     results.push(...payoutResults);
   }

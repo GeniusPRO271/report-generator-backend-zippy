@@ -27,7 +27,6 @@ export class StatsService {
       throw new Error("REDIS_URL is not defined");
     }
     this.redis = new Redis(process.env.REDIS_URL);
-    console.debug("[StatsService] Initialized Redis client");
   }
 
   private buildKey(filters: StatsFilterSchemaType): string {
@@ -44,29 +43,21 @@ export class StatsService {
         : null,
     };
 
-    // Use original names in the cache key
     const key = `stats:${JSON.stringify(normalized)}`;
-    console.debug("[StatsService] Built cache key:", key);
     return key;
   }
 
   async getStats(filters: StatsFilterSchemaType) {
     const key = this.buildKey(filters);
-    console.debug("[StatsService] Fetching stats for filters:", filters);
 
     try {
       const cached = await this.redis.get(key);
-      if (cached) {
-        console.debug("[StatsService] Cache hit for key:", key);
-        return JSON.parse(cached);
-      }
-      console.debug("[StatsService] Cache miss for key:", key);
+      if (cached) return JSON.parse(cached);
     } catch (err) {
       console.warn("[StatsService] Redis cache error:", err);
     }
 
     const stats = await this.computeStats(filters);
-    console.debug("[StatsService] Computed stats:", stats);
 
     try {
       await this.redis.set(
@@ -74,9 +65,6 @@ export class StatsService {
         JSON.stringify(stats),
         "EX",
         StatsService.CACHE_TTL_SECONDS,
-      );
-      console.debug(
-        `[StatsService] Cached stats for key ${key} with TTL ${StatsService.CACHE_TTL_SECONDS}s`
       );
     } catch (err) {
       console.warn("[StatsService] Failed to cache stats:", err);
@@ -86,9 +74,6 @@ export class StatsService {
   }
 
   private async computeStats(filters: StatsFilterSchemaType) {
-    console.debug("[StatsService] Computing stats for filters:", filters)
-
-    // Normalize filter arrays and INCLUDE DATE
     const normalizedFilters: StatsFilterSchemaType = {
       ...filters,
       merchantId: filters.merchantId?.filter(Boolean) || undefined,
@@ -99,26 +84,13 @@ export class StatsService {
       to: filters.to,
     }
 
-    console.debug(
-      "[StatsService] Normalized filters sent to repository:",
-      normalizedFilters
-    )
-
     const transactions =
       await this.transactionRepository.findWithFilter(normalizedFilters)
 
-    console.debug(
-      `[StatsService] Found ${transactions.length} transactions`
-    )
-
     if (transactions.length === 0) {
-      console.debug(
-        "[StatsService] No transactions found, generating empty stats"
-      )
       return this.statsGenerator.generate([])
     }
 
-    // --------- NO CHANGES BELOW THIS LINE ---------
     const merchantIds = new Set(transactions.map((t) => t.merchantId))
     const providerIds = new Set(transactions.map((t) => t.providerId))
     const countryIds = new Set(transactions.map((t) => t.countryId))
@@ -153,13 +125,7 @@ export class StatsService {
       const country = countryMap.get(t.countryId)
       const payMethod = payMethodMap.get(t.payMethodId)
 
-      if (!merchant || !provider || !country || !payMethod) {
-        console.warn(
-          "[StatsService] Skipping transaction due to missing entity:",
-          { transactionId: t.id }
-        )
-        continue
-      }
+      if (!merchant || !provider || !country || !payMethod) continue
 
       baseTransactions.push({
         id: t.id,
@@ -196,10 +162,7 @@ export class StatsService {
 
     try {
       const cached = await this.redis.get(cacheKey);
-      if (cached) {
-        console.debug("[StatsService] Approval rates cache hit:", cacheKey);
-        return JSON.parse(cached);
-      }
+      if (cached) return JSON.parse(cached);
     } catch (err) {
       console.warn("[StatsService] Redis cache error (approval rates):", err);
     }
@@ -244,8 +207,6 @@ export class StatsService {
       payMethodId?: string[];
     }
   ) {
-    // page 1 = most recent pageSize days, page 2 = pageSize days before that, etc.
-    // All day boundaries are in Chile timezone (America/Santiago)
     const CHILE_TZ = "America/Santiago";
     const nowChile = DateTime.now().setZone(CHILE_TZ);
 
@@ -255,21 +216,22 @@ export class StatsService {
     const toDate = toChile.toJSDate();
     const fromDate = fromChile.toJSDate();
 
-    // Fetch transactions for this date window
-    const transactions = await this.transactionRepository.findForApprovalRates(
-      fromDate, toDate, filters
-    );
+    // SQL aggregation — returns pre-grouped rows instead of all raw transactions
+    const [rows, earliestDate] = await Promise.all([
+      this.transactionRepository.getAggregatedApprovalRates(
+        fromDate, toDate, CHILE_TZ, filters
+      ),
+      this.transactionRepository.getEarliestTransactionDate(filters),
+    ]);
 
-    // Compute total days for pagination
-    const earliestDate = await this.transactionRepository.getEarliestTransactionDate(filters);
-    let totalDays = pageSize; // default
+    let totalDays = pageSize;
     if (earliestDate) {
       const earliestChile = DateTime.fromJSDate(new Date(earliestDate)).setZone(CHILE_TZ).startOf("day");
       totalDays = Math.ceil(nowChile.endOf("day").diff(earliestChile, "days").days);
     }
     const totalPages = Math.max(1, Math.ceil(totalDays / pageSize));
 
-    if (transactions.length === 0) {
+    if (rows.length === 0) {
       return {
         data: [],
         pagination: { page, pageSize, totalDays, totalPages },
@@ -277,9 +239,9 @@ export class StatsService {
     }
 
     // Collect unique IDs for name enrichment
-    const merchantIds = new Set(transactions.map((t) => t.merchantId));
-    const providerIds = new Set(transactions.map((t) => t.providerId));
-    const payMethodIds = new Set(transactions.map((t) => t.payMethodId));
+    const merchantIds = new Set(rows.map((r) => r.merchantId));
+    const providerIds = new Set(rows.flatMap((r) => r.providers ?? []));
+    const payMethodIds = new Set(rows.map((r) => r.payMethodId));
 
     const [merchants, providers, payMethods] = await Promise.all([
       merchantIds.size ? this.merchantRepository.findByIds([...merchantIds]) : [],
@@ -291,58 +253,35 @@ export class StatsService {
     const providerMap = new Map(providers.map((p) => [p.id, p.name]));
     const payMethodMap = new Map(payMethods.map((p) => [p.id, p.name]));
 
-    // Aggregate: group by merchantId + payMethodId + dateKey
-    // For each group: count total, count ok, collect unique providers
-    const groupMap = new Map<
-      string,
-      { total: number; ok: number; providers: Set<string> }
-    >();
-
-    for (const t of transactions) {
-      const dateKey = DateTime.fromJSDate(t.dateRequest).setZone(CHILE_TZ).toFormat("yyyy-MM-dd");
-      const key = `${t.merchantId}|||${t.payMethodId}|||${dateKey}`;
-
-      let group = groupMap.get(key);
-      if (!group) {
-        group = { total: 0, ok: 0, providers: new Set() };
-        groupMap.set(key, group);
-      }
-
-      group.total++;
-      if (t.status === "ok") group.ok++;
-
-      const providerName = providerMap.get(t.providerId);
-      if (providerName) group.providers.add(providerName);
-    }
-
-    // Shape into MerchantApprovalData[]
-    // Intermediate: merchantId → payMethodId → dailyData[]
+    // Build merchantId → payMethodId → dailyData[] from pre-aggregated rows
     const merchantMethodMap = new Map<
       string,
       Map<string, { date: string; approvalRate: number; numTransactions: number; providersUsed: string[] }[]>
     >();
 
-    for (const [key, group] of groupMap) {
-      const [mId, pmId, dateKey] = key.split("|||");
-
-      if (!merchantMethodMap.has(mId)) {
-        merchantMethodMap.set(mId, new Map());
+    for (const row of rows) {
+      if (!merchantMethodMap.has(row.merchantId)) {
+        merchantMethodMap.set(row.merchantId, new Map());
       }
-      const methodMap = merchantMethodMap.get(mId)!;
+      const methodMap = merchantMethodMap.get(row.merchantId)!;
 
-      if (!methodMap.has(pmId)) {
-        methodMap.set(pmId, []);
+      if (!methodMap.has(row.payMethodId)) {
+        methodMap.set(row.payMethodId, []);
       }
 
-      methodMap.get(pmId)!.push({
-        date: dateKey,
-        approvalRate: group.total > 0 ? (group.ok / group.total) * 100 : 0,
-        numTransactions: group.total,
-        providersUsed: Array.from(group.providers).sort(),
+      const providerNames = (row.providers ?? [])
+        .map((pid) => providerMap.get(pid))
+        .filter(Boolean)
+        .sort() as string[];
+
+      methodMap.get(row.payMethodId)!.push({
+        date: row.day,
+        approvalRate: row.total > 0 ? (row.okCount / row.total) * 100 : 0,
+        numTransactions: row.total,
+        providersUsed: providerNames,
       });
     }
 
-    // Build final structure — filter out merchants/methods with no data
     const data = Array.from(merchantMethodMap.entries()).map(([mId, methodMap]) => ({
       merchantName: merchantMap.get(mId) ?? mId,
       methods: Array.from(methodMap.entries())

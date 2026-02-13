@@ -1,4 +1,4 @@
-import { bigint, boolean, index, integer, numeric, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, integer, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const report = pgTable('report', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -26,7 +26,7 @@ export const provider = pgTable("provider", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (t) => [
-  index("idx_provider_name").on(t.name),
+  uniqueIndex("uq_provider_name").on(t.name),
 ]);
 
 export const merchant = pgTable("merchant", {
@@ -42,7 +42,7 @@ export const merchant = pgTable("merchant", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (t) => [
-  index("idx_merchant_name").on(t.name),
+  uniqueIndex("uq_merchant_name").on(t.name),
 ]);
 
 export const merchantAPIConfig = pgTable("merchant_api_config", {
@@ -91,7 +91,9 @@ export const payMethod = pgTable("pay_method", {
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (t) => [
-  index("idx_pay_method_name").on(t.name),
+  uniqueIndex("uq_pay_method_name_provider_country").on(t.name, t.providerId, t.countryId),
+  index("idx_pay_method_provider").on(t.providerId),
+  index("idx_pay_method_country").on(t.countryId),
 ]);
 
 export const countryOperation = pgTable("country_operation", {
@@ -123,6 +125,7 @@ export const countryOperation = pgTable("country_operation", {
 }, (t) => [
   index("idx_country_op_merchant_country").on(t.merchantId, t.countryId),
   index("idx_country_op_lookup").on(t.merchantId, t.providerId, t.countryId, t.payMethodId),
+  uniqueIndex("uq_country_op_composite").on(t.merchantId, t.providerId, t.countryId, t.payMethodId),
 ]);
 
 export const user = pgTable("user", {
@@ -172,5 +175,8 @@ export const transaction = pgTable("transaction", {
   index("idx_transaction_commerce_req_id").on(t.commerceReqId),
   index("idx_transaction_date_request").on(t.dateRequest),
   index("idx_transaction_merchant_country").on(t.merchantId, t.countryId),
+  index("idx_transaction_provider").on(t.providerId),
+  index("idx_transaction_pay_method").on(t.payMethodId),
+  index("idx_transaction_status").on(t.status),
 ]);
 

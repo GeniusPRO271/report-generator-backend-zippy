@@ -13,6 +13,7 @@ import healthRoutes from './routes/health.routes'
 import statisticsRoutes from './routes/statistics.route'
 import authRoutes from './routes/auth.route'
 import userRoutes from './routes/user.routes'
+import dedupRoutes from './routes/dedup.routes'
 
 import { logger } from './middleware/logger'
 import { authMiddleware } from './middleware/auth'
@@ -49,5 +50,6 @@ app.route('/api/transactions', transactionRoutes)
 
 // Superadmin-only routes (auth middleware already applied via /api/*)
 app.route('/api/users', userRoutes)
+app.route('/api/admin/dedup', dedupRoutes)
 
 export default app
