@@ -50,6 +50,13 @@
       "when": 1770970971734,
       "tag": "0006_huge_malice",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1771419048496,
+      "tag": "0007_purple_warbound",
+      "breakpoints": true
     }
   ]
 }

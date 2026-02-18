@@ -2,12 +2,14 @@ import Redis from "ioredis";
 import { Service } from "typedi";
 import { TransactionRepository } from "../repositories/transaction.repository";
 import { StatsFilterSchemaType, ApprovalRatesFilterSchemaType } from "../types/zod/statsSchemas";
-import { StatsGenerator } from "../generator/statistics.generator";
+import { StatsGenerator, PaymentBreakdown, ComparisonData } from "../generator/statistics.generator";
 import { BaseTransaction } from "../types";
 import { MerchantRepository } from "../repositories/merchant.repository";
 import { ProviderRepository } from "../repositories/provider.repository";
 import { CountryRepository } from "../repositories/country.repository";
 import { PayMethodRepository } from "../repositories/payMethod.repository";
+import { CountryOperationRepository } from "../repositories/countryOperation.repository";
+import { detectExchangeRates, convertToUSD } from "../utils/statistic.utils";
 import { DateTime } from "luxon";
 
 @Service()
@@ -22,6 +24,7 @@ export class StatsService {
     private readonly providerRepository: ProviderRepository,
     private readonly countryRepository: CountryRepository,
     private readonly payMethodRepository: PayMethodRepository,
+    private readonly countryOperationRepository: CountryOperationRepository,
   ) {
     if (!process.env.REDIS_URL) {
       throw new Error("REDIS_URL is not defined");
@@ -41,6 +44,7 @@ export class StatsService {
       to: filters.to
         ? new Date(filters.to).toISOString()
         : null,
+      comparisonType: filters.comparisonType ?? "previous_period",
     };
 
     const key = `stats:${JSON.stringify(normalized)}`;
@@ -84,11 +88,20 @@ export class StatsService {
       to: filters.to,
     }
 
-    const transactions =
-      await this.transactionRepository.findWithFilter(normalizedFilters)
+    const [transactions, countryOps] = await Promise.all([
+      this.transactionRepository.findWithFilter(normalizedFilters),
+      this.countryOperationRepository.findAllTypeLookup(),
+    ])
 
     if (transactions.length === 0) {
       return this.statsGenerator.generate([])
+    }
+
+    // Build countryOperation type lookup: "merchantId|providerId|countryId|payMethodId" → "PAYIN"|"PAYOUT"
+    const opTypeMap = new Map<string, string>()
+    for (const op of countryOps) {
+      const key = `${op.merchantId}|${op.providerId}|${op.countryId}|${op.payMethodId}`
+      opTypeMap.set(key, op.type)
     }
 
     const merchantIds = new Set(transactions.map((t) => t.merchantId))
@@ -118,6 +131,8 @@ export class StatsService {
     const payMethodMap = new Map(payMethods.map((p) => [p.id, p]))
 
     const baseTransactions: BaseTransaction[] = []
+    // Track enriched raw transactions for PayIn/PayOut breakdown
+    const enrichedRawTransactions: typeof transactions = []
 
     for (const t of transactions) {
       const merchant = merchantMap.get(t.merchantId)
@@ -127,6 +142,7 @@ export class StatsService {
 
       if (!merchant || !provider || !country || !payMethod) continue
 
+      enrichedRawTransactions.push(t)
       baseTransactions.push({
         id: t.id,
         merchantName: merchant.name,
@@ -151,8 +167,159 @@ export class StatsService {
       })
     }
 
-    const stats = this.statsGenerator.generate(baseTransactions)
+    // Compute PayIn/PayOut breakdown (only enriched transactions)
+    const rates = detectExchangeRates(baseTransactions)
+    let payInTotal = 0
+    let payOutTotal = 0
+
+    for (const t of enrichedRawTransactions) {
+      if (t.status !== "ok") continue
+      const amount = Number(t.quantity)
+      if (!Number.isFinite(amount)) continue
+
+      const usd = convertToUSD(amount, t.currency, rates)
+      const opKey = `${t.merchantId}|${t.providerId}|${t.countryId}|${t.payMethodId}`
+      const opType = opTypeMap.get(opKey) ?? "PAYIN"
+
+      if (opType === "PAYOUT") {
+        payOutTotal += usd
+      } else {
+        payInTotal += usd
+      }
+    }
+
+    const paymentBreakdown: PaymentBreakdown = {
+      total: payInTotal + payOutTotal,
+      payInTotal,
+      payOutTotal,
+      net: payInTotal - payOutTotal,
+    }
+
+    const stats = this.statsGenerator.generate(baseTransactions, paymentBreakdown)
+
+    // Compute comparison period if date range is provided
+    const comparisonType = filters.comparisonType ?? "previous_period"
+    if (normalizedFilters.from && normalizedFilters.to) {
+      const comparison = await this.computeComparison(
+        normalizedFilters,
+        comparisonType,
+        stats,
+      )
+      if (comparison) {
+        stats.comparison = comparison
+        // Also populate legacy fields from comparison
+        stats.lastWeekIncreaseCount = comparison.deltaTransactions
+        stats.lastWeekIncreaseAOV = comparison.deltaAOV
+        stats.lastWeekIncreaseSuccessRate = comparison.deltaSuccessRate
+      }
+    }
+
     return stats
+  }
+
+  private computeComparisonDates(
+    from: string,
+    to: string,
+    comparisonType: string,
+  ): { compareFrom: string; compareTo: string } {
+    const fromDate = new Date(from)
+    const toDate = new Date(to)
+
+    if (comparisonType === "previous_month") {
+      const compareFrom = new Date(fromDate)
+      compareFrom.setMonth(compareFrom.getMonth() - 1)
+      const compareTo = new Date(toDate)
+      compareTo.setMonth(compareTo.getMonth() - 1)
+      return {
+        compareFrom: compareFrom.toISOString(),
+        compareTo: compareTo.toISOString(),
+      }
+    }
+
+    if (comparisonType === "previous_year") {
+      const compareFrom = new Date(fromDate)
+      compareFrom.setFullYear(compareFrom.getFullYear() - 1)
+      const compareTo = new Date(toDate)
+      compareTo.setFullYear(compareTo.getFullYear() - 1)
+      return {
+        compareFrom: compareFrom.toISOString(),
+        compareTo: compareTo.toISOString(),
+      }
+    }
+
+    // "previous_period" (default): shift back by the same duration
+    const durationMs = toDate.getTime() - fromDate.getTime()
+    const compareTo = new Date(fromDate.getTime() - 1) // 1ms before main period start
+    const compareFrom = new Date(compareTo.getTime() - durationMs)
+    return {
+      compareFrom: compareFrom.toISOString(),
+      compareTo: compareTo.toISOString(),
+    }
+  }
+
+  private percentChange(current: number, previous: number): number {
+    if (previous === 0) return current > 0 ? 100 : 0
+    return ((current - previous) / previous) * 100
+  }
+
+  private async computeComparison(
+    filters: StatsFilterSchemaType,
+    comparisonType: string,
+    mainStats: { totalTransactions: number; avgOrderValue: number; successRate: number; totalRevenue: number },
+  ): Promise<ComparisonData | null> {
+    if (!filters.from || !filters.to) return null
+
+    const { compareFrom, compareTo } = this.computeComparisonDates(
+      filters.from,
+      filters.to,
+      comparisonType,
+    )
+
+    // Fetch comparison period transactions
+    const compFilters: StatsFilterSchemaType = {
+      ...filters,
+      from: compareFrom,
+      to: compareTo,
+      comparisonType: undefined, // avoid recursion if someone passes it
+    }
+
+    const compTransactions = await this.transactionRepository.findWithFilter(compFilters)
+
+    // Quick metrics from comparison transactions (no full enrichment needed)
+    const compTotal = compTransactions.length
+    const compOk = compTransactions.filter((t) => t.status === "ok").length
+    const compSuccessRate = compTotal > 0 ? (compOk / compTotal) * 100 : 0
+
+    // Compute comparison revenue and AOV
+    // Build base transactions for exchange rate detection
+    const compBase = compTransactions.map((t) => ({
+      quantity: t.quantity,
+      currency: t.currency,
+      status: t.status,
+    }))
+
+    const compRates = detectExchangeRates(compBase as any)
+    let compRevenue = 0
+    let compOkRevCount = 0
+
+    for (const t of compTransactions) {
+      if (t.status !== "ok") continue
+      const amount = Number(t.quantity)
+      if (!Number.isFinite(amount)) continue
+      compRevenue += convertToUSD(amount, t.currency, compRates)
+      compOkRevCount++
+    }
+
+    const compAOV = compOkRevCount > 0 ? compRevenue / compOkRevCount : 0
+
+    return {
+      from: compareFrom,
+      to: compareTo,
+      deltaTransactions: this.percentChange(mainStats.totalTransactions, compTotal),
+      deltaAOV: this.percentChange(mainStats.avgOrderValue, compAOV),
+      deltaSuccessRate: this.percentChange(mainStats.successRate, compSuccessRate),
+      deltaRevenue: this.percentChange(mainStats.totalRevenue, compRevenue),
+    }
   }
 
   async getApprovalRates(filters: ApprovalRatesFilterSchemaType) {
@@ -217,8 +384,11 @@ export class StatsService {
     const fromDate = fromChile.toJSDate();
 
     // SQL aggregation — returns pre-grouped rows instead of all raw transactions
-    const [rows, earliestDate] = await Promise.all([
+    const [rows, providerRows, earliestDate] = await Promise.all([
       this.transactionRepository.getAggregatedApprovalRates(
+        fromDate, toDate, CHILE_TZ, filters
+      ),
+      this.transactionRepository.getAggregatedApprovalRatesByProvider(
         fromDate, toDate, CHILE_TZ, filters
       ),
       this.transactionRepository.getEarliestTransactionDate(filters),
@@ -231,21 +401,24 @@ export class StatsService {
     }
     const totalPages = Math.max(1, Math.ceil(totalDays / pageSize));
 
-    if (rows.length === 0) {
+    if (rows.length === 0 && providerRows.length === 0) {
       return {
         data: [],
+        providerApprovalData: [],
         pagination: { page, pageSize, totalDays, totalPages },
       };
     }
 
     // Collect unique IDs for name enrichment
     const merchantIds = new Set(rows.map((r) => r.merchantId));
-    const providerIds = new Set(rows.flatMap((r) => r.providers ?? []));
+    const providerIdsFromMerchant = new Set(rows.flatMap((r) => r.providers ?? []));
+    const providerIdsFromProvider = new Set(providerRows.map((r) => r.providerId));
+    const allProviderIds = new Set([...providerIdsFromMerchant, ...providerIdsFromProvider]);
     const payMethodIds = new Set(rows.map((r) => r.payMethodId));
 
     const [merchants, providers, payMethods] = await Promise.all([
       merchantIds.size ? this.merchantRepository.findByIds([...merchantIds]) : [],
-      providerIds.size ? this.providerRepository.findByIds([...providerIds]) : [],
+      allProviderIds.size ? this.providerRepository.findByIds([...allProviderIds]) : [],
       payMethodIds.size ? this.payMethodRepository.findByIds([...payMethodIds]) : [],
     ]);
 
@@ -294,8 +467,33 @@ export class StatsService {
       .filter((m) => m.methods.length > 0)
       .sort((a, b) => a.merchantName.localeCompare(b.merchantName));
 
+    // Build provider-level approval data
+    const providerDailyMap = new Map<
+      string,
+      { date: string; approvalRate: number; numTransactions: number }[]
+    >();
+
+    for (const row of providerRows) {
+      if (!providerDailyMap.has(row.providerId)) {
+        providerDailyMap.set(row.providerId, []);
+      }
+      providerDailyMap.get(row.providerId)!.push({
+        date: row.day,
+        approvalRate: row.total > 0 ? (row.okCount / row.total) * 100 : 0,
+        numTransactions: row.total,
+      });
+    }
+
+    const providerApprovalData = Array.from(providerDailyMap.entries())
+      .map(([pId, dailyData]) => ({
+        providerName: providerMap.get(pId) ?? pId,
+        dailyData: dailyData.sort((a, b) => a.date.localeCompare(b.date)),
+      }))
+      .sort((a, b) => a.providerName.localeCompare(b.providerName));
+
     return {
       data,
+      providerApprovalData,
       pagination: { page, pageSize, totalDays, totalPages },
     };
   }

@@ -135,6 +135,7 @@ export const user = pgTable("user", {
   name: text("name"),
   role: text("role", { enum: ["superadmin", "user"] }).notNull().default("user"),
   isActive: boolean("is_active").notNull().default(true),
+  tokenVersion: integer("token_version").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

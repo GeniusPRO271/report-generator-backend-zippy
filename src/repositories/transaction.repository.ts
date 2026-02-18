@@ -199,6 +199,46 @@ export class TransactionRepository {
       );
   }
 
+  async getAggregatedApprovalRatesByProvider(
+    from: Date,
+    to: Date,
+    timezone: string,
+    filters: {
+      merchantId?: string[];
+      providerId?: string[];
+      countryId?: string[];
+      payMethodId?: string[];
+    }
+  ) {
+    const clauses: SQL[] = [
+      gte(transaction.dateRequest, from),
+      lte(transaction.dateRequest, to),
+    ];
+
+    if (filters.merchantId?.length)
+      clauses.push(inArray(transaction.merchantId, filters.merchantId));
+    if (filters.providerId?.length)
+      clauses.push(inArray(transaction.providerId, filters.providerId));
+    if (filters.countryId?.length)
+      clauses.push(inArray(transaction.countryId, filters.countryId));
+    if (filters.payMethodId?.length)
+      clauses.push(inArray(transaction.payMethodId, filters.payMethodId));
+
+    return await db
+      .select({
+        providerId: transaction.providerId,
+        day: sql<string>`to_char(${transaction.dateRequest} AT TIME ZONE ${timezone}, 'YYYY-MM-DD')`,
+        total: sql<number>`count(*)::int`,
+        okCount: sql<number>`count(*) filter (where ${transaction.status} = 'ok')::int`,
+      })
+      .from(transaction)
+      .where(and(...clauses))
+      .groupBy(
+        transaction.providerId,
+        sql`to_char(${transaction.dateRequest} AT TIME ZONE ${timezone}, 'YYYY-MM-DD')`,
+      );
+  }
+
   async getEarliestTransactionDate(filters?: {
     merchantId?: string[];
     providerId?: string[];

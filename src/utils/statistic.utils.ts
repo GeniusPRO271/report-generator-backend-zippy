@@ -82,7 +82,7 @@ export interface RevenueEntry {
 }
 
 // ---------- Currency rates (heuristic, same idea as your original) ----------
-interface CurrencyRates {
+export interface CurrencyRates {
   [currency: string]: number;
 }
 
@@ -113,7 +113,7 @@ function normalizeCurrency(currency: string): string {
   return String(currency || "").toUpperCase();
 }
 
-function detectExchangeRates(transactions: BaseTransaction[]): CurrencyRates {
+export function detectExchangeRates(transactions: BaseTransaction[]): CurrencyRates {
   const rates: CurrencyRates = { ...KNOWN_RATES };
 
   // Collect amounts for unknown currencies in a single pass
@@ -158,7 +158,7 @@ function detectExchangeRates(transactions: BaseTransaction[]): CurrencyRates {
   return rates;
 }
 
-function convertToUSD(
+export function convertToUSD(
   amount: number,
   currency: string,
   rates: CurrencyRates,

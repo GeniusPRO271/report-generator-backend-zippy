@@ -24,6 +24,11 @@ export const StatsFilterSchema = z.object({
 
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
+
+  comparisonType: z
+    .enum(["previous_period", "previous_month", "previous_year"])
+    .optional()
+    .default("previous_period"),
 })
 
 

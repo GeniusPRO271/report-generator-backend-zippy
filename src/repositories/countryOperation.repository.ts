@@ -78,6 +78,18 @@ export class CountryOperationRepository {
       );
   }
 
+  async findAllTypeLookup() {
+    return db
+      .select({
+        merchantId: countryOperation.merchantId,
+        providerId: countryOperation.providerId,
+        countryId: countryOperation.countryId,
+        payMethodId: countryOperation.payMethodId,
+        type: countryOperation.type,
+      })
+      .from(countryOperation);
+  }
+
   async ensureExists(data) {
     const [existing] = await db
       .select()

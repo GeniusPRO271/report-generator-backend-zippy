@@ -27,6 +27,22 @@ import {
 
 import { BaseTransaction } from "../types";
 
+export interface PaymentBreakdown {
+  total: number;
+  payInTotal: number;
+  payOutTotal: number;
+  net: number;
+}
+
+export interface ComparisonData {
+  from: string;
+  to: string;
+  deltaTransactions: number;
+  deltaAOV: number;
+  deltaSuccessRate: number;
+  deltaRevenue: number;
+}
+
 export interface AnalyticsResultBackend {
   totalTransactions: number;
   avgOrderValue: number;
@@ -46,6 +62,8 @@ export interface AnalyticsResultBackend {
   lastWeekIncreaseCount: ReturnType<typeof calculateLastWeekIncrease>;
   lastWeekIncreaseAOV: ReturnType<typeof calculateLastWeekIncrease>;
   lastWeekIncreaseSuccessRate: ReturnType<typeof calculateLastWeekIncrease>;
+  paymentBreakdown: PaymentBreakdown;
+  comparison?: ComparisonData;
 }
 
 @Service()
@@ -53,6 +71,7 @@ export class StatsGenerator {
 
   public generate(
     transactions: BaseTransaction[],
+    paymentBreakdown?: PaymentBreakdown,
   ): AnalyticsResultBackend {
 
     const avgOrderValue = calculateAOV(transactions);
@@ -99,6 +118,7 @@ export class StatsGenerator {
       lastWeekIncreaseCount,
       lastWeekIncreaseAOV,
       lastWeekIncreaseSuccessRate,
+      paymentBreakdown: paymentBreakdown ?? { total: 0, payInTotal: 0, payOutTotal: 0, net: 0 },
     };
   }
 
