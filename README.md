@@ -1,4 +1,4 @@
-# Zippy Pay Backend
+# Zippy Pay Operational Dashboard Backend
 
 Hono-based REST API with TypeDI, Drizzle ORM, and BullMQ job processing.
 
