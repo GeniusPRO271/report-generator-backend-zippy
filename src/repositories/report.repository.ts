@@ -1,34 +1,83 @@
 import { Service } from 'typedi';
 import { db } from '../db/connection';
-import { reports } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { report } from '../db/schema';
+import { and, desc, eq, inArray, lt } from 'drizzle-orm';
+import {
+  InsertReportSchemaType,
+  ReportSchemaType,
+} from '../db/zodSchema/reports.schema';
 
-interface ReportRecord {
-  id: string;
-  merchantName: string;
-  reportType: 'finance' | 'resume';
-  country: string;
-  status: string;
-  resultUrl?: string;
-}
+const PROCESSING_STATUSES = ['processing', 'retrying'] as const;
 
 @Service()
 export class ReportRepository {
-  async create(report: ReportRecord) {
-    await db.insert(reports).values(report);
-    return report;
+  async create(data: InsertReportSchemaType): Promise<ReportSchemaType> {
+    const now = new Date();
+
+    const [row] = await db
+      .insert(report)
+      .values({
+        ...data,
+        createdAt: data.createdAt ?? now,
+        updatedAt: data.updatedAt ?? now,
+      })
+      .returning();
+
+    if (!row) {
+      throw new Error('Failed to create report row');
+    }
+
+    return row as ReportSchemaType;
   }
 
-  async update(id: string, updates: Partial<Omit<ReportRecord, 'id'>>) {
-    await db.update(reports).set(updates).where(eq(reports.id, id));
+  async update(
+    id: string,
+    updates: Partial<Omit<ReportSchemaType, 'id'>>,
+  ): Promise<void> {
+    await db
+      .update(report)
+      .set({
+        ...updates,
+        updatedAt: new Date(),
+      })
+      .where(eq(report.id, id));
   }
 
-  async findById(id: string) {
-    const result = await db.select().from(reports).where(eq(reports.id, id)).limit(1);
-    return result[0] || null;
+  async findById(id: string): Promise<ReportSchemaType | null> {
+    const result = await db
+      .select()
+      .from(report)
+      .where(eq(report.id, id))
+      .limit(1);
+
+    return (result[0] as ReportSchemaType | undefined) ?? null;
   }
 
-  async findAll() {
-    return await db.select().from(reports).orderBy(reports.createdAt) as ReportRecord[];
+  async findAll(): Promise<ReportSchemaType[]> {
+    return (await db
+      .select()
+      .from(report)
+      .orderBy(desc(report.createdAt))) as ReportSchemaType[];
+  }
+
+  async findStaleProcessingReports(
+    cutoff: Date,
+  ): Promise<Pick<ReportSchemaType, 'id' | 'status' | 'updatedAt'>[]> {
+    const rows = await db
+      .select({
+        id: report.id,
+        status: report.status,
+        updatedAt: report.updatedAt,
+      })
+      .from(report)
+      .where(
+        and(
+          inArray(report.status, [...PROCESSING_STATUSES]),
+          lt(report.updatedAt, cutoff),
+        ),
+      )
+      .orderBy(desc(report.updatedAt));
+
+    return rows as any;
   }
 }

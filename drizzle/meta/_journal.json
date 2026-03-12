@@ -8,6 +8,48 @@
       "when": 1761814311569,
       "tag": "0000_colorful_young_avengers",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1764760573862,
+      "tag": "0001_absent_dust",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1765280507206,
+      "tag": "0002_clear_revanche",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1767681566468,
+      "tag": "0003_hesitant_silver_sable",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1770338112179,
+      "tag": "0004_fearless_wiccan",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1770708974261,
+      "tag": "0005_mysterious_lake",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1770970971734,
+      "tag": "0006_huge_malice",
+      "breakpoints": true
     }
   ]
 }

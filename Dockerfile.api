@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 3110
 
-CMD ["bun", "run", "dev:api"]
+CMD ["sh", "-c", "bun run seed && bun run dev:api"]

@@ -9,5 +9,5 @@ COPY . .
 
 EXPOSE 3110
 
-CMD ["sh", "-c", "bun run dev:api & bun run dev:worker && wait"]
+CMD ["sh", "-c", "bun run seed && bun run dev:api & bun run dev:worker && wait"]
 
