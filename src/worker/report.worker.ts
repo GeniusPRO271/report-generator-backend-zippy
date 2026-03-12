@@ -15,6 +15,7 @@ import { ProviderRepository } from "../repositories/provider.repository";
 import { CountryRepository } from "../repositories/country.repository";
 import { PayMethodRepository } from "../repositories/payMethod.repository";
 import { CountryOperationRepository } from "../repositories/countryOperation.repository";
+import { StorageService } from "../services/storage.service";
 
 import { CreateReportRequest } from "../types/zod/report";
 import { ReportTransactionSchemaType } from "../types/zod";
@@ -78,6 +79,7 @@ export class ReportWorker {
     private readonly countryRepository: CountryRepository,
     private readonly payMethodRepository: PayMethodRepository,
     private readonly countryOperationRepository: CountryOperationRepository,
+    private readonly storageService: StorageService,
   ) {
     this.baseConnection = new IORedis(config.redisUrl, {
       maxRetriesPerRequest: null,
@@ -130,7 +132,7 @@ export class ReportWorker {
 
         await this.reportRepository.update(jobId, {
           status: "done",
-          resultUrl: `file://${returnvalue}`,
+          resultUrl: returnvalue,
         });
       } catch (err) {
         console.error("❌ [QueueEvents] completed handler failed:", err);
@@ -266,15 +268,17 @@ export class ReportWorker {
         throw new Error("Unsupported reportType");
       }
 
+      const s3Key = await this.storageService.upload(filePath);
+
       await this.reportRepository.update(jobId, {
         status: "done",
-        resultUrl: `file://${filePath}`,
+        resultUrl: s3Key,
       });
 
       const sec = ((Date.now() - startedAt) / 1000).toFixed(2);
       console.log(`✅ [Worker] Done reportId=${jobId} in ${sec}s`);
 
-      return filePath;
+      return s3Key;
     } catch (err: any) {
       const attemptsRemaining = Math.max(0, attempts - attempt);
       const status = attemptsRemaining > 0 ? "retrying" : "failed";

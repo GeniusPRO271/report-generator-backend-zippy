@@ -13,6 +13,7 @@ import {
 } from "../db/zodSchema/transactions.schema";
 import { CountryService } from "./country.service";
 import { BaseTransaction } from "../types";
+import { TransactionSearchFilterType } from "../types/zod/transactionSearchSchema";
 
 @Service()
 export class TransactionService {
@@ -89,12 +90,13 @@ export class TransactionService {
     providerId: string,
     countryId: string
   ) {
-    let pm = await this.payMethodRepository.findByNameProviderCountry(name, providerId, countryId);
+    const normalizedName = name.trim().toLowerCase();
+    let pm = await this.payMethodRepository.findByNameProviderCountry(normalizedName, providerId, countryId);
     if (pm) return pm;
 
     try {
       pm = await this.payMethodRepository.create({
-        name,
+        name: normalizedName,
         category: "CARD",
         providerId,
         countryId,
@@ -102,7 +104,7 @@ export class TransactionService {
       });
     } catch (err: any) {
       if (err.message.includes("unique") || err.message.includes("duplicate")) {
-        pm = await this.payMethodRepository.findByNameProviderCountry(name, providerId, countryId);
+        pm = await this.payMethodRepository.findByNameProviderCountry(normalizedName, providerId, countryId);
       } else throw err;
     }
     return pm;
@@ -305,6 +307,59 @@ export class TransactionService {
     };
   }
 
+  private mapStatus(dbStatus: string): string {
+    switch (dbStatus) {
+      case "ok": return "approved";
+      case "error": return "failed";
+      default: return "pending";
+    }
+  }
+
+  async findFiltered(filters: TransactionSearchFilterType) {
+    const { rows, total } = await this.transactionRepository.findFilteredPaginated(filters);
+
+    if (rows.length === 0) {
+      return { data: [], total: 0, page: filters.page, pageSize: filters.pageSize };
+    }
+
+    const merchantIds = [...new Set(rows.map((t) => t.merchantId))];
+    const providerIds = [...new Set(rows.map((t) => t.providerId))];
+    const countryIds = [...new Set(rows.map((t) => t.countryId))];
+    const methodIds = [...new Set(rows.map((t) => t.payMethodId))];
+
+    const [merchants, providers, countries, methods] = await Promise.all([
+      this.merchantRepository.findByIds(merchantIds),
+      this.providerRepository.findByIds(providerIds),
+      this.countryRepository.findByIds(countryIds),
+      this.payMethodRepository.findByIds(methodIds),
+    ]);
+
+    const merchantMap = new Map(merchants.map((m) => [m.id, m]));
+    const providerMap = new Map(providers.map((p) => [p.id, p]));
+    const countryMap = new Map(countries.map((c) => [c.id, c]));
+    const methodMap = new Map(methods.map((m) => [m.id, m]));
+
+    const data = rows.map((t) => ({
+      id: t.id,
+      method: methodMap.get(t.payMethodId)?.name ?? "",
+      status: this.mapStatus(t.status),
+      merchant: merchantMap.get(t.merchantId)?.name ?? "",
+      provider: providerMap.get(t.providerId)?.name ?? "",
+      country: countryMap.get(t.countryId)?.isoCode ?? "",
+      requestDate: t.dateRequest.toISOString(),
+      transferDate: null,
+      name: t.name,
+      email: t.email,
+      idDocument: t.documentId,
+      amount: Number(t.quantity) || 0,
+      currency: t.currency,
+      zippyId: t.zippyId ?? "",
+      commerceReqId: t.commerceReqId,
+    }));
+
+    return { data, total, page: filters.page, pageSize: filters.pageSize };
+  }
+
   async findAllVersion2(page: number, limit: number) {
     page = Math.max(1, page);
     limit = Math.max(1, limit);
@@ -430,16 +485,33 @@ export class TransactionService {
         const existing = existingMap.get(raw.commerceReqId);
 
         if (existing) {
+          const shouldBackfillZippyId = raw.zippyId && !existing.zippyId;
+
           if (raw.status === "ok" && existing.status !== "ok") {
             await this.transactionRepository.update(existing.id, {
               status: "ok",
+              ...(shouldBackfillZippyId && { zippyId: raw.zippyId }),
             });
             results.push({
               success: true,
               updated: true,
-              reason: "Status updated to ok",
+              reason: shouldBackfillZippyId ? "Status updated to ok, zippyId backfilled" : "Status updated to ok",
               id: existing.id,
               commerceReqId: raw.commerceReqId,
+              zippyId: raw.zippyId ?? null,
+              type: "PAYIN",
+            });
+          } else if (shouldBackfillZippyId) {
+            await this.transactionRepository.update(existing.id, {
+              zippyId: raw.zippyId,
+            });
+            results.push({
+              success: true,
+              updated: true,
+              reason: "zippyId backfilled",
+              id: existing.id,
+              commerceReqId: raw.commerceReqId,
+              zippyId: raw.zippyId,
               type: "PAYIN",
             });
           } else {
@@ -448,6 +520,7 @@ export class TransactionService {
               skipped: true,
               reason: "Duplicate commerceReqId",
               commerceReqId: raw.commerceReqId,
+              zippyId: raw.zippyId ?? null,
               type: "PAYIN",
             });
           }
@@ -474,7 +547,7 @@ export class TransactionService {
           countryCache.set(countryKey, country);
         }
 
-        const pmKey = `${raw.payMethod}|${provider.id}|${country.id}`;
+        const pmKey = `${raw.payMethod.trim().toLowerCase()}|${provider.id}|${country.id}`;
         let payMethod = payMethodCache.get(pmKey);
         if (!payMethod) {
           payMethod = await this.findOrCreatePayMethod(
@@ -511,6 +584,7 @@ export class TransactionService {
           quantity: raw.quantity,
           commerceId: raw.commerceId,
           commerceReqId: raw.commerceReqId,
+          zippyId: raw.zippyId ?? null,
           email: raw.email,
           name: raw.name,
           requestTimestamp: Math.floor(Number(raw.request_timestamp) / 1000),
@@ -532,6 +606,7 @@ export class TransactionService {
           id: createdTx.id,
           type: "PAYIN",
           commerceReqId: raw.commerceReqId,
+          zippyId: raw.zippyId ?? null,
         });
       } catch (err: any) {
         results.push({
@@ -539,6 +614,7 @@ export class TransactionService {
           type: "PAYIN",
           error: err.message,
           commerceReqId: raw.commerceReqId,
+          zippyId: raw.zippyId ?? null,
         });
       }
     }
@@ -575,16 +651,33 @@ export class TransactionService {
 
         if (existing) {
           const incomingStatus = raw.status || "pending";
+          const shouldBackfillZippyId = raw.zippyId && !existing.zippyId;
+
           if (incomingStatus === "ok" && existing.status !== "ok") {
             await this.transactionRepository.update(existing.id, {
               status: "ok",
+              ...(shouldBackfillZippyId && { zippyId: raw.zippyId }),
             });
             results.push({
               success: true,
               updated: true,
-              reason: "Status updated to ok",
+              reason: shouldBackfillZippyId ? "Status updated to ok, zippyId backfilled" : "Status updated to ok",
               id: existing.id,
               commerceReqId: raw.commerceReqId,
+              zippyId: raw.zippyId ?? null,
+              type: "PAYOUT",
+            });
+          } else if (shouldBackfillZippyId) {
+            await this.transactionRepository.update(existing.id, {
+              zippyId: raw.zippyId,
+            });
+            results.push({
+              success: true,
+              updated: true,
+              reason: "zippyId backfilled",
+              id: existing.id,
+              commerceReqId: raw.commerceReqId,
+              zippyId: raw.zippyId,
               type: "PAYOUT",
             });
           } else {
@@ -593,6 +686,7 @@ export class TransactionService {
               skipped: true,
               reason: "Duplicate commerceReqId",
               commerceReqId: raw.commerceReqId,
+              zippyId: raw.zippyId ?? null,
               type: "PAYOUT",
             });
           }
@@ -657,6 +751,7 @@ export class TransactionService {
           quantity: String(raw.quantity || conciliation.amount || "0"),
           commerceId: raw.commerceId,
           commerceReqId: raw.commerceReqId,
+          zippyId: raw.zippyId ?? null,
           email: raw.email || conciliation.user_email || "",
           name: raw.name || conciliation.name || "",
           requestTimestamp: Math.floor(Number(raw.request_timestamp) / 1000),
@@ -675,6 +770,7 @@ export class TransactionService {
           id: createdTx.id,
           type: "PAYOUT",
           commerceReqId: raw.commerceReqId,
+          zippyId: raw.zippyId ?? null,
         });
       } catch (err: any) {
         results.push({
@@ -682,6 +778,7 @@ export class TransactionService {
           type: "PAYOUT",
           error: err.message,
           commerceReqId: raw.commerceReqId,
+          zippyId: raw.zippyId ?? null,
         });
       }
     }

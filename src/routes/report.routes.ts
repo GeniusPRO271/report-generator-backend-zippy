@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { Container } from "typedi";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
@@ -49,21 +50,13 @@ reportRoutes.get(
   zValidator("param", IdParamSchema),
   async (c) => {
     const { id } = c.req.valid("param");
-    const range = c.req.header("range");
 
     try {
-      const dl = await reportService.downloadReport(id, range);
-
-      // Use Hono helper instead of new Response(...)
-      return c.body(dl.body, dl.status, dl.headers);
+      const { url, fileName } = await reportService.downloadReport(id);
+      return c.json({ url, fileName });
     } catch (err) {
       if (err instanceof HttpError) {
-        if (err.status === 416) {
-          return c.json({ error: err.message }, 416, {
-            "Content-Range": "bytes */*",
-          });
-        }
-        return c.json({ error: err.message }, err.status);
+        return c.json({ error: err.message }, err.status as ContentfulStatusCode);
       }
 
       const msg = err instanceof Error ? err.message : String(err);

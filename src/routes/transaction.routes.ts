@@ -4,6 +4,7 @@ import Container from "typedi";
 import { TransactionService } from "../services/transaction.service";
 import { InsertTransactionSchema, UpdateTransactionSchema } from "../db/zodSchema/transactions.schema";
 import { PaginationSchema } from "../types/zod/pagination";
+import { TransactionSearchFilterSchema } from "../types/zod/transactionSearchSchema";
 import { requireRole } from "../middleware/requireRole";
 
 const transactionRoutes = new Hono();
@@ -20,11 +21,11 @@ transactionRoutes.post(
 );
 
 transactionRoutes.get("/",
-  zValidator("query", PaginationSchema),
+  zValidator("query", TransactionSearchFilterSchema),
   async (c) => {
-    const { page, limit } = c.req.valid("query");
-    const all = await transactionService.findAll(page, limit);
-    return c.json(all);
+    const filters = c.req.valid("query");
+    const result = await transactionService.findFiltered(filters);
+    return c.json(result);
   });
 
 transactionRoutes.get("/v2",

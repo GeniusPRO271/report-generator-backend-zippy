@@ -8,21 +8,9 @@ import {
 } from "../types/statistics.types";
 
 import {
-  calculateAOV,
-  calculateSuccessRate,
-  aggregateTransactionsByDay,
-  groupTransactionsByCountry,
-  generateChartConfig,
-  calculateTotalRevenue,
-  aggregateRevenueByMonth,
-  calculateRevenueChangeValue,
-  generateRevenueChartData,
-  getLast5WeeksChartData,
-  getLast5WeeksAOVChartData,
-  getLast5WeeksSuccessRateChartData,
-  calculateLastWeekIncrease,
-  processTransactionData,
-  computeCountryRevenue,
+  analyzeTransactions,
+  RevenueEntry,
+  ChartConfig,
 } from "../utils/statistic.utils";
 
 import { BaseTransaction } from "../types";
@@ -37,16 +25,18 @@ export interface AnalyticsResultBackend {
   revenueByCountry: RevenueCountry[];
   transactionsForChart: DailyTransactionSummary[];
   countriesData: CountryTransactionSummary[];
-  revenuByDay: ReturnType<typeof generateRevenueChartData>;
-  chartConfig: ReturnType<typeof generateChartConfig>;
+  revenuByDay: RevenueEntry[];
+  chartConfig: ChartConfig;
   trxRate: ChartDataItem[];
   last5WeeksData: ChartDataWeekly[];
   last5WeeksAOVData: ChartDataWeekly[];
   last5WeeksSuccessRateData: ChartDataWeekly[];
-  lastWeekIncreaseCount: ReturnType<typeof calculateLastWeekIncrease>;
-  lastWeekIncreaseAOV: ReturnType<typeof calculateLastWeekIncrease>;
-  lastWeekIncreaseSuccessRate: ReturnType<typeof calculateLastWeekIncrease>;
+  lastWeekIncreaseCount: number;
+  lastWeekIncreaseAOV: number;
+  lastWeekIncreaseSuccessRate: number;
 }
+
+const CHILE_TZ = "America/Santiago";
 
 @Service()
 export class StatsGenerator {
@@ -55,50 +45,27 @@ export class StatsGenerator {
     transactions: BaseTransaction[],
   ): AnalyticsResultBackend {
 
-    const avgOrderValue = calculateAOV(transactions);
-    const successRate = calculateSuccessRate(transactions);
-
-    const totalRevenue = calculateTotalRevenue(transactions);
-    const monthlyRevenue = aggregateRevenueByMonth(transactions);
-    const revenueChange = calculateRevenueChangeValue(transactions);
-
-    const revenueByCountry = computeCountryRevenue(transactions);
-
-    const transactionsForChart = aggregateTransactionsByDay(transactions);
-    const countriesData = groupTransactionsByCountry(transactions);
-
-    const revenuByDay = generateRevenueChartData(transactions);
-    const chartConfig = generateChartConfig(transactions);
-
-    const trxRate = processTransactionData(transactions);
-
-    const last5WeeksData = getLast5WeeksChartData(transactions);
-    const last5WeeksAOVData = getLast5WeeksAOVChartData(transactions);
-    const last5WeeksSuccessRateData = getLast5WeeksSuccessRateChartData(transactions);
-
-    const lastWeekIncreaseCount = calculateLastWeekIncrease(transactions, "count");
-    const lastWeekIncreaseAOV = calculateLastWeekIncrease(transactions, "aov");
-    const lastWeekIncreaseSuccessRate = calculateLastWeekIncrease(transactions, "successRate");
+    const analytics = analyzeTransactions(transactions, { timezone: CHILE_TZ });
 
     return {
       totalTransactions: transactions.length,
-      avgOrderValue,
-      successRate,
-      totalRevenue,
-      monthlyRevenue,
-      revenueChange,
-      revenueByCountry,
-      transactionsForChart,
-      countriesData,
-      revenuByDay,
-      chartConfig,
-      trxRate,
-      last5WeeksData,
-      last5WeeksAOVData,
-      last5WeeksSuccessRateData,
-      lastWeekIncreaseCount,
-      lastWeekIncreaseAOV,
-      lastWeekIncreaseSuccessRate,
+      avgOrderValue: analytics.aov,
+      successRate: analytics.successRate,
+      totalRevenue: analytics.totalRevenue,
+      monthlyRevenue: analytics.monthlyRevenue,
+      revenueChange: analytics.revenueChangeValue,
+      revenueByCountry: analytics.countryRevenue,
+      transactionsForChart: analytics.dailySummary,
+      countriesData: analytics.countrySummary,
+      revenuByDay: analytics.revenueChartData,
+      chartConfig: analytics.chartConfig,
+      trxRate: analytics.statusBreakdown,
+      last5WeeksData: analytics.last5WeeksCount,
+      last5WeeksAOVData: analytics.last5WeeksAov,
+      last5WeeksSuccessRateData: analytics.last5WeeksSuccessRate,
+      lastWeekIncreaseCount: analytics.lastWeekIncrease("count"),
+      lastWeekIncreaseAOV: analytics.lastWeekIncrease("aov"),
+      lastWeekIncreaseSuccessRate: analytics.lastWeekIncrease("successRate"),
     };
   }
 

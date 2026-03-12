@@ -26,6 +26,7 @@ export interface BaseTransaction {
   quantity: string;
   commerceId: string;
   commerceReqId: string;
+  zippyId?: string;
   email: string;
   name: string;
   request_timestamp: number;

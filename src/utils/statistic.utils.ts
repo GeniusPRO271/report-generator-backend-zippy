@@ -1,3 +1,5 @@
+import { DateTime } from "luxon";
+
 // Types
 export interface BaseTransaction {
   id: string;
@@ -82,32 +84,13 @@ export interface RevenueEntry {
 }
 
 // ---------- Currency rates (heuristic, same idea as your original) ----------
+import { CURRENCY_TO_USD } from "./currencyRates";
+
 interface CurrencyRates {
   [currency: string]: number;
 }
 
-const KNOWN_RATES: CurrencyRates = {
-  USD: 1.0,
-
-  // South American Currencies (approximate to USD)
-  ARS: 0.001,
-  BOB: 0.145,
-  BRL: 0.2,
-  CLP: 0.001,
-  COP: 0.00025,
-  PEN: 0.27,
-  PYG: 0.00013,
-  UYU: 0.025,
-  VES: 0.027,
-  GYD: 0.0048,
-  SRD: 0.028,
-
-  // Common additional currencies
-  EUR: 1.1,
-  GBP: 1.27,
-  CAD: 0.74,
-  MXN: 0.05,
-};
+const KNOWN_RATES: CurrencyRates = { ...CURRENCY_TO_USD };
 
 function normalizeCurrency(currency: string): string {
   return String(currency || "").toUpperCase();
@@ -169,23 +152,31 @@ function convertToUSD(
 }
 
 // ---------- Date helpers (faster than toISOString().slice(0, 10)) ----------
-type TimezoneMode = "utc" | "local";
+type TimezoneMode = string; // "utc", "local", or any IANA timezone (e.g. "America/Santiago")
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
 
+function toZoned(d: Date, tz: TimezoneMode): { year: number; month: number; day: number } {
+  if (tz === "utc") {
+    return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+  }
+  if (tz === "local") {
+    return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+  }
+  const dt = DateTime.fromJSDate(d, { zone: tz });
+  return { year: dt.year, month: dt.month, day: dt.day };
+}
+
 function formatDateKey(d: Date, tz: TimezoneMode): string {
-  const y = tz === "utc" ? d.getUTCFullYear() : d.getFullYear();
-  const m = tz === "utc" ? d.getUTCMonth() + 1 : d.getMonth() + 1;
-  const day = tz === "utc" ? d.getUTCDate() : d.getDate();
-  return `${y}-${pad2(m)}-${pad2(day)}`;
+  const { year, month, day } = toZoned(d, tz);
+  return `${year}-${pad2(month)}-${pad2(day)}`;
 }
 
 function formatMonthKey(d: Date, tz: TimezoneMode): string {
-  const y = tz === "utc" ? d.getUTCFullYear() : d.getFullYear();
-  const m = tz === "utc" ? d.getUTCMonth() + 1 : d.getMonth() + 1;
-  return `${y}-${pad2(m)}`;
+  const { year, month } = toZoned(d, tz);
+  return `${year}-${pad2(month)}`;
 }
 
 function getMonthStartMs(now: number, tz: TimezoneMode): number {
@@ -193,7 +184,10 @@ function getMonthStartMs(now: number, tz: TimezoneMode): number {
   if (tz === "utc") {
     return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
   }
-  return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  if (tz === "local") {
+    return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  }
+  return DateTime.fromMillis(now, { zone: tz }).startOf("month").toMillis();
 }
 
 function getMonthStartMsOffset(
@@ -205,7 +199,10 @@ function getMonthStartMsOffset(
   if (tz === "utc") {
     return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + monthOffset, 1);
   }
-  return new Date(d.getFullYear(), d.getMonth() + monthOffset, 1).getTime();
+  if (tz === "local") {
+    return new Date(d.getFullYear(), d.getMonth() + monthOffset, 1).getTime();
+  }
+  return DateTime.fromMillis(now, { zone: tz }).plus({ months: monthOffset }).startOf("month").toMillis();
 }
 
 // Rolling 7-day windows (matches your original logic):

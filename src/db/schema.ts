@@ -157,6 +157,7 @@ export const transaction = pgTable("transaction", {
   quantity: numeric("quantity").notNull(),
   commerceId: text("commerce_id").notNull(),
   commerceReqId: text("commerce_req_id").notNull(),
+  zippyId: text("zippy_id"),
   email: text("email").notNull(),
   name: text("name").notNull(),
   requestTimestamp: bigint("request_timestamp", { mode: "number" }).notNull(),
@@ -173,6 +174,7 @@ export const transaction = pgTable("transaction", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (t) => [
   index("idx_transaction_commerce_req_id").on(t.commerceReqId),
+  uniqueIndex("idx_transaction_zippy_id").on(t.zippyId),
   index("idx_transaction_date_request").on(t.dateRequest),
   index("idx_transaction_merchant_country").on(t.merchantId, t.countryId),
   index("idx_transaction_provider").on(t.providerId),

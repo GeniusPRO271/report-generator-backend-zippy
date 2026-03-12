@@ -11,6 +11,8 @@ import countryOperationRoutes from './routes/countryOperation.routes'
 import transactionRoutes from './routes/transaction.routes'
 import healthRoutes from './routes/health.routes'
 import statisticsRoutes from './routes/statistics.route'
+import operationsStatsRoutes from './routes/operationsStats.routes'
+import transactionAnalyticsRoutes from './routes/transactionAnalytics.routes'
 import authRoutes from './routes/auth.route'
 import userRoutes from './routes/user.routes'
 import dedupRoutes from './routes/dedup.routes'
@@ -46,6 +48,8 @@ app.route('/api/merchant-api-config', merchantAPIConfigRoutes)
 app.route('/api/countries', countryRoutes)
 app.route('/api/country-operations', countryOperationRoutes)
 app.route('/api/stats', statisticsRoutes)
+app.route('/api/stats/operations', operationsStatsRoutes)
+app.route('/api/stats/transaction-analytics', transactionAnalyticsRoutes)
 app.route('/api/transactions', transactionRoutes)
 
 // Superadmin-only routes (auth middleware already applied via /api/*)

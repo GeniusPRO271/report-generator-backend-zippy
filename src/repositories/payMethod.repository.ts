@@ -1,7 +1,7 @@
 import { Service } from "typedi";
 import { db } from "../db/connection";
 import { payMethod } from "../db/schema";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, ilike, inArray } from "drizzle-orm";
 import { InsertPayMethodSchemaType, PayMethodSchemaType } from "../db/zodSchema/payMethod.schema";
 
 @Service()
@@ -48,7 +48,7 @@ export class PayMethodRepository {
       .from(payMethod)
       .where(
         and(
-          eq(payMethod.name, name),
+          ilike(payMethod.name, name),
           eq(payMethod.providerId, providerId),
           eq(payMethod.countryId, countryId)
         )

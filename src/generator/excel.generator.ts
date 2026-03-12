@@ -9,6 +9,10 @@ import {
   ReportTransactionSchema,
   ReportTransactionSchemaType,
 } from "../types/zod";
+import {
+  evaluateExcelFormula,
+  excelFormulaToExcelNative,
+} from "../utils/excelFormula";
 
 interface MethodParameter {
   methodId: string;
@@ -63,7 +67,7 @@ export type ExcelGeneratorPayload =
 @Service()
 export class ExcelGenerator {
   private readonly reportZoneDefault = "America/Santiago";
-  private commissionFnCache = new Map<string, (amount: number) => number>();
+  // Commission function cache is now managed by the excelFormula util
 
   async generateReport(
     payload: ExcelGeneratorPayload,
@@ -330,7 +334,7 @@ export class ExcelGenerator {
         const commission = this.evaluateCommissionCached(formula, amount);
         netTotal += amount - commission;
 
-        const excelFormula = formula.replace(/amount/g, amount.toString());
+        const excelFormula = excelFormulaToExcelNative(formula, amount);
         const totalFormula = `${amount} - (${excelFormula})`;
 
         // Convert date to Chilean timezone
@@ -941,48 +945,8 @@ export class ExcelGenerator {
     return this.saveWorkbook(workbook, `resume_report_${reportId}`);
   }
 
-  private evaluateCommission(formula: string, amount: number): number {
-    try {
-      if (formula.includes("amount")) {
-        // eslint-disable-next-line no-new-func
-        const fn = new Function("amount", `return ${formula};`);
-        return Number(fn(amount)) || 0;
-      }
-      return Number(formula) || 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  private getCommissionFn(formula: string): (amount: number) => number {
-    const cached = this.commissionFnCache.get(formula);
-    if (cached) return cached;
-
-    let fn: (amount: number) => number;
-
-    if (formula.includes("amount")) {
-      // eslint-disable-next-line no-new-func
-      fn = new Function(
-        "amount",
-        `"use strict"; return (${formula});`,
-      ) as any;
-    } else {
-      const fixed = Number(formula) || 0;
-      fn = () => fixed;
-    }
-
-    this.commissionFnCache.set(formula, fn);
-    return fn;
-  }
-
   private evaluateCommissionCached(formula: string, amount: number): number {
-    try {
-      const fn = this.getCommissionFn(formula);
-      const v = Number(fn(amount));
-      return Number.isFinite(v) ? v : 0;
-    } catch {
-      return 0;
-    }
+    return evaluateExcelFormula(formula, amount);
   }
 
   // CHANGED: accepts timezone and uses it for month boundaries
